@@ -4,6 +4,8 @@ Created by Aljay Leodones for Beckham Hotel.
 """
 
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 import sys
 
 import discord
@@ -16,12 +18,13 @@ from config import (
     GUILD_ID,
 )
 from views.announcement_view import AnnouncementHubView
-from views.beckham_onboarding_view import BeckhamOnboardingHubView
+from views.beckham_onboarding_view import BeckhamOnboardingHubView, SavedOnboardingOpenButton
 from views.creator_onboarding_view import (
     CreatorJourneyView,
     CreatorOnboardingHubView,
     CreatorQuestionnaireView,
     CreatorWelcomeView,
+    OnboardingTicketView,
     Shop101DoneView,
 )
 from views.member_report_view import MemberReportHubView
@@ -29,10 +32,14 @@ from views.mod_panel_view import ModPanelView
 from views.onboarding_view import OnboardingHubView
 
 # Configure logging
+Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        RotatingFileHandler("logs/beckham.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("beckham_bot")
 
@@ -74,9 +81,11 @@ class BeckhamBot(commands.Bot):
         self.add_view(OnboardingHubView())
         self.add_view(CreatorOnboardingHubView())
         self.add_view(BeckhamOnboardingHubView())
+        self.add_dynamic_items(SavedOnboardingOpenButton)
         # Member-facing creator buttons, shared by the public Onboarding post
         # and every private Beckham onboarding channel.
         self.add_view(CreatorWelcomeView())
+        self.add_view(OnboardingTicketView())
         self.add_view(CreatorJourneyView())
         self.add_view(Shop101DoneView())
         self.add_view(CreatorQuestionnaireView())

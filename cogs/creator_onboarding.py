@@ -24,6 +24,7 @@ from config import (
     COMMUNITY_DATABASE_PATH,
     CREATOR_GETTING_STARTED_CHANNEL_ID,
     CREATOR_SUPPORT_CHANNEL_ID,
+    CREATOR_OPPORTUNITIES_CHANNEL_ID,
     CREATOR_WELCOME_CHANNEL_ID,
 )
 from cogs.onboarding import (
@@ -102,14 +103,17 @@ CHANNEL_SETTINGS = {
     "welcome": "creator_welcome_channel_id",
     "getting_started": "creator_getting_started_channel_id",
     "support": "creator_support_channel_id",
+    "opportunities": "creator_opportunities_channel_id",
 }
 CHANNEL_LABELS = {
-    "welcome": "Default welcome channel",
+    "welcome": "Default test channel",
     "getting_started": "Getting-started channel",
     "support": "Support-ticket channel",
+    "opportunities": "Opportunities channel",
 }
 CHANNEL_HINTS = {
-    "welcome": "Pre-selected for every creator welcome (you can still pick another).",
+    "opportunities": "Linked in the message members receive after completing onboarding.",
+    "welcome": "Pre-selected for test messages. Real welcomes go to each member's private onboarding channel.",
     "getting_started": (
         "Where 🌱 learning creators are sent (TikTok Shop 101). Unset = the "
         f"channel named #{GETTING_STARTED_NAME}."
@@ -120,6 +124,7 @@ ENV_CHANNEL_DEFAULTS = {
     "welcome": CREATOR_WELCOME_CHANNEL_ID,
     "getting_started": CREATOR_GETTING_STARTED_CHANNEL_ID,
     "support": CREATOR_SUPPORT_CHANNEL_ID,
+    "opportunities": CREATOR_OPPORTUNITIES_CHANNEL_ID,
 }
 
 JOURNEYS = ("learning", "experienced")
@@ -169,6 +174,27 @@ def next_step_message(guild: discord.Guild | None, support_channel_id: int | Non
         else "our support channel"
     )
     return NEXT_STEP_MESSAGE.format(support=support)
+
+
+OPPORTUNITIES_NAME = "opportunities-to-earn"
+COMPLETION_MESSAGE = (
+    "You now have full access to the Beckham Hotel creator community! Head to {channel} "
+    "to see all the ways you can earn with us. 🎉"
+)
+
+def completion_message(guild: discord.Guild | None, channel_id: int | None) -> str:
+    """The "you now have full access" message, linking #opportunities-to-earn."""
+    if channel_id is None and guild is not None:
+        found = discord.utils.get(getattr(guild, "text_channels", []), name=OPPORTUNITIES_NAME)
+        channel_id = found.id if found is not None else None
+    if channel_id and guild is not None:
+        channel = _channel_link(guild, channel_id)
+    elif channel_id:
+        channel = f"<#{channel_id}>"
+    else:
+        channel = f"**#{OPPORTUNITIES_NAME}**"
+    return COMPLETION_MESSAGE.format(channel=channel)
+
 
 
 class CreatorOnboardingCog(commands.Cog, name="CreatorOnboardingCog"):

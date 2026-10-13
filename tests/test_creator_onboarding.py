@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import asyncio
 import unittest
 import unittest.mock
+import views.creator_onboarding_view as creator_view
 
 import discord
 
@@ -19,6 +20,7 @@ from cogs.creator_onboarding import (
     CreatorSettings,
     getting_started_mention,
     learning_message,
+    completion_message,
     next_step_message,
 )
 from cogs.onboarding import MAX_MESSAGE_LENGTH, DayGroup
@@ -353,83 +355,162 @@ class FakeGuildMember(discord.Object):
     mention = "<@42>"
 
 
+FULL_ACCESS = (
+    "You now have full access to the Beckham Hotel creator community! Head to "
+    "**#opportunities-to-earn** "
+    "to see all the ways you can earn with us. 🎉"
+)
+
+
+
 class QuestionnaireCompletionTests(unittest.TestCase):
-    def finish(self, *, in_ticket, granted, saved=True):
-        tickets = FakeTicketCog(owner=42 if in_ticket else None, granted=granted)
-        interaction = make_interaction(make_cog(), tickets=tickets)
+    def finish(self, *, in_ticket, granted, saved=True, settings=None, channel_fails=False):
+        cgk = FakeTicketCog(owner=42 if in_ticket else None, granted=granted)
+        interaction = make_interaction(make_cog(settings), tickets=cgk)
         interaction.user = FakeGuildMember(42)
-        followups = []
+        followups, deleted = [], []
 
         async def followup(content, **kwargs):
             followups.append((content, kwargs))
 
         async def channel_send(content=None, **kwargs):
+            if channel_fails:
+                raise discord.Forbidden(SimpleNamespace(status=403, reason="no"), "no")
             interaction.channel.sent.append({"content": content, **kwargs})
+
+        async def delete_original_response():
+            deleted.append(True)
 
         interaction.followup = SimpleNamespace(send=followup)
         interaction.channel.send = channel_send
+        interaction.delete_original_response = delete_original_response
         modal = CreatorQuestionnaireModal(SimpleNamespace(id=42), in_ticket=in_ticket)
         with unittest.mock.patch.object(discord, "Member", FakeGuildMember):
             run(modal.after_save(interaction, saved))
-        return tickets, interaction, followups
+        self.deleted = deleted
+        return cgk, interaction, followups
 
-    def test_finishing_grants_access_and_logs_in_the_ticket(self):
-        tickets, interaction, followups = self.finish(in_ticket=True, granted=True)
-        self.assertEqual(tickets.completed, [42])
-        self.assertIn("you now have access", followups[0][0])
-        self.assertTrue(followups[0][1]["ephemeral"])
-        self.assertIn("completed onboarding. Access granted.", interaction.channel.sent[0]["content"])
+    def test_completion_message_copy(self):
+        guild = SimpleNamespace(id=10, get_channel=lambda _: SimpleNamespace(name="opportunities-to-earn"))
+        self.assertEqual(
+            completion_message(guild, 20),
+            "You now have full access to the Beckham Hotel creator community! Head to "
+            "[#opportunities-to-earn](https://discord.com/channels/10/20) "
+            "to see all the ways you can earn with us. 🎉",
+        )
+        self.assertIn("**#opportunities-to-earn**", completion_message(guild, None))
+
+    def test_ticket_gets_full_access_message_after_the_role(self):
+        cgk, interaction, followups = self.finish(in_ticket=True, granted=True)
+        self.assertEqual(cgk.completed, [42])  # role granted
+        self.assertEqual(interaction.channel.sent[0]["content"], FULL_ACCESS)
+        self.assertEqual(followups, [])  # no duplicate private copy
+        self.assertEqual(self.deleted, [True])  # the "thinking…" note is removed
+
+    def test_shared_channel_gets_it_privately(self):
+        _, interaction, followups = self.finish(in_ticket=False, granted=True, saved=False)
+        self.assertEqual(followups[0], (FULL_ACCESS, {"ephemeral": True}))
+        self.assertEqual(interaction.channel.sent, [])
+
+    def test_saved_opportunities_channel_is_used(self):
+        _, _, followups = self.finish(
+            in_ticket=False, granted=True, settings={CHANNEL_SETTINGS["opportunities"]: "999"}
+        )
+        self.assertIn("<#999>", followups[0][0])
 
     def test_role_failure_is_reported(self):
         _, interaction, followups = self.finish(in_ticket=True, granted=False)
-        self.assertIn("our team will give you access shortly", followups[0][0])
-        self.assertIn("could not be granted", interaction.channel.sent[0]["content"])
+        post = interaction.channel.sent[0]["content"]
+        self.assertIn("our team will give you access shortly", post)
+        self.assertIn("could not be granted to <@42>", post)
+        self.assertNotIn("full access", post)
 
-    def test_shared_channel_reply_stays_private(self):
-        _, interaction, followups = self.finish(in_ticket=False, granted=True, saved=False)
-        self.assertIn("already on file", followups[0][0])
-        self.assertEqual(interaction.channel.sent, [])
+    def test_falls_back_to_private_reply_if_channel_post_fails(self):
+        _, _, followups = self.finish(in_ticket=True, granted=True, channel_fails=True)
+        self.assertEqual(followups[0], (FULL_ACCESS, {"ephemeral": True}))
+        self.assertEqual(self.deleted, [])
 
     def test_edit_answers_keeps_ticket_mode(self):
         modal = CreatorQuestionnaireModal(SimpleNamespace(id=42), in_ticket=True)
         again = modal.reopen(SimpleNamespace(id=42), {"email": "x"})
         self.assertIsInstance(again, CreatorQuestionnaireModal)
         self.assertTrue(again.in_ticket)
-        # Unlike the Introduce Yourself form, it can be submitted from any channel.
-        self.assertTrue(modal.channel_allowed(SimpleNamespace(channel_id=123)))
 
 
 class ModeratorViewTests(unittest.TestCase):
-    def make_draft(self, default_channel=500):
+    def test_all_four_channel_settings_fit_and_preserve_support(self):
+        async def check():
+            settings = await make_cog().settings(1)
+            view = creator_view.CreatorSettingsView(settings)
+            self.assertEqual(len(view.children), 5)
+            self.assertEqual({child.row for child in view.children}, {0, 1, 2, 3, 4})
+            self.assertIn("Support-ticket channel", creator_view.build_settings_embed(settings).description)
+            self.assertIn(str(SUPPORT_CHANNEL), creator_view.build_settings_embed(settings).description)
+        run(check())
+
+    def test_private_delivery_logs_only_successful_members(self):
+        async def check():
+            from cogs.beckham_onboarding import TicketResult
+            from unittest.mock import AsyncMock, patch
+            cog = make_cog()
+            tickets = SimpleNamespace(
+                settings=AsyncMock(return_value=SimpleNamespace()),
+                setup_problems=lambda guild, settings: [],
+                deliver=AsyncMock(return_value=TicketResult(
+                    created=[SimpleNamespace(mention="<#123>")],
+                    member_ids=[1], failed=[("Member2", "missing permissions")],
+                )),
+            )
+            interaction = make_interaction(cog, tickets=tickets)
+            interaction.user.id = 7
+            interaction.id = 99
+            interaction.edit_original_response = AsyncMock()
+            draft = self.make_draft()
+            view = CreatorComposerView(draft)
+            with patch.object(creator_view, "replace_message", new=AsyncMock()):
+                await creator_view._execute_delivery(interaction, view)
+            self.assertEqual([row[0] for row in cog.db.marked], [1])
+            self.assertIs(tickets.deliver.call_args.kwargs["view_factory"], creator_view.OnboardingTicketView)
+        run(check())
+
+    def test_creator_form_can_finish_in_private_onboarding_channel(self):
+        modal = CreatorQuestionnaireModal(SimpleNamespace(id=42), in_ticket=True)
+        self.assertTrue(modal.channel_allowed(SimpleNamespace(channel_id=123)))
+
+    def make_draft(self, problems=None):
         groups = [
             DayGroup("d0", "Joined today", "", [FakeMember(1)]),
             DayGroup("d1", "Joined yesterday", "", [FakeMember(2, days_ago=1)]),
         ]
         settings = CreatorSettings(
-            channels={"welcome": default_channel, "getting_started": None},
-            sources={"welcome": "saved", "getting_started": "unset"},
+            channels={"welcome": None, "getting_started": None},
+            sources={"welcome": "unset", "getting_started": "unset"},
         )
-        return CreatorDraft.start(7, groups, settings)
+        return CreatorDraft.start(
+            7, groups, settings, category="**Onboarding**", problems=problems
+        )
 
-    def test_composer_ready_on_default_channel(self):
+    def test_composer_opens_private_channels(self):
         async def check():
             draft = self.make_draft()
             view = CreatorComposerView(draft)
             self.assertEqual(view.send.label, "Send to 2 members")
             self.assertFalse(view.send.disabled)
-            self.assertTrue(view.make_default.disabled)
+            embeds = build_composer_embeds(draft)
+            self.assertIn("#handle-onboarding", embeds[0].description)
+            self.assertIn("**Onboarding**", embeds[0].description)
+            self.assertIn("Are you a TikTok Shop creator?", embeds[1].description)
+            self.assertIn("private onboarding channel", embeds[1].description)
             draft.apply_selection({"d1"})
             self.assertEqual([m.id for m in draft.selected_members], [2])
 
         run(check())
 
-    def test_composer_needs_a_channel(self):
+    def test_composer_blocked_by_setup_problems(self):
         async def check():
-            draft = self.make_draft(default_channel=None)
+            draft = self.make_draft(problems=["The onboarding **category** was not found."])
             self.assertTrue(CreatorComposerView(draft).send.disabled)
-            embeds = build_composer_embeds(draft)
-            self.assertIn("No channel chosen", embeds[0].description)
-            self.assertIn("Are you a TikTok Shop creator?", embeds[1].description)
+            self.assertIn("Fix before sending", build_composer_embeds(draft)[0].description)
 
         run(check())
 

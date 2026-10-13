@@ -113,12 +113,14 @@ CREATOR_GETTING_STARTED_CHANNEL_ID = _optional_int(
 )
 CREATOR_SUPPORT_CHANNEL_ID = _optional_int("CREATOR_SUPPORT_CHANNEL_ID", "1549416221995307058")
 
+CREATOR_OPPORTUNITIES_CHANNEL_ID = _optional_int("CREATOR_OPPORTUNITIES_CHANNEL_ID")
+
 # Beckham Onboarding: each new member gets a private "<handle>-onboarding"
 # channel in this category, and finishing the questionnaire there grants the
 # access role that unlocks the rest of the server. Both can be changed from
 # the Mod Panel (Beckham Onboarding -> Settings); saved choices win.
-BECKHAM_ONBOARDING_CATEGORY_ID = _optional_int("BECKHAM_ONBOARDING_CATEGORY_ID")
-BECKHAM_ONBOARDING_ROLE_ID = _optional_int("BECKHAM_ONBOARDING_ROLE_ID")
+BECKHAM_ONBOARDING_CATEGORY_ID = _optional_int("BECKHAM_ONBOARDING_CATEGORY_ID", "1559567789948141710")
+BECKHAM_ONBOARDING_ROLE_ID = _optional_int("BECKHAM_ONBOARDING_ROLE_ID", "1559568207495303279")
 
 # How far back the onboarding scanner looks for members that were never welcomed
 ONBOARDING_LOOKBACK_DAYS = _positive_int("ONBOARDING_LOOKBACK_DAYS", 30)

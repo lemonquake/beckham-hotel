@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.questionnaire import publish_questionnaire
+from views.beckham_onboarding_view import open_test_channel
 from views.common import require_manage
 
 from views.engagement_contest_view import (
@@ -17,6 +18,7 @@ from views.engagement_contest_view import (
 from views.member_report_view import MemberReportHubView, build_report_hub_embed
 from views.mod_panel_view import ModPanelView, build_mod_panel_embed
 from views.onboarding_view import OnboardingHubView, build_hub_embed
+from views.role_giver_view import open_role_giver
 
 
 class ModPanelCog(commands.Cog):
@@ -51,6 +53,26 @@ class ModPanelCog(commands.Cog):
         await interaction.followup.send(content=notice, embed=embed, view=OnboardingHubView(), ephemeral=True)
 
     @app_commands.command(
+        name="test-onboarding",
+        description="Open a private onboarding channel to test the flow (yourself or a member).",
+    )
+    @app_commands.describe(member="Who to onboard. Leave empty to test it on yourself.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def test_onboarding_command(
+        self, interaction: discord.Interaction, member: discord.Member | None = None
+    ):
+        """Opens a Beckham onboarding channel without adding anyone to a tagged group."""
+        if not await require_manage(interaction):
+            return
+        target = member or interaction.user
+        if target.bot:
+            await interaction.response.send_message("Bots can't be onboarded.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await open_test_channel(interaction, target)
+
+    @app_commands.command(
         name="community-report",
         description="Post the persistent community growth report panel here.",
     )
@@ -75,7 +97,19 @@ class ModPanelCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="role-giver",
+        description="Assign a role to all members in bulk with custom exclusion filters.",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def role_giver_command(self, interaction: discord.Interaction):
+        """Opens the Role Giver hub (also reachable from /summon)."""
+        if not await require_manage(interaction):
+            return
+        await open_role_giver(interaction)
+
 
 async def setup(bot: commands.Bot):
+
     """Adds the ModPanelCog to the bot."""
     await bot.add_cog(ModPanelCog(bot))

@@ -8,10 +8,12 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import asyncio
 import unittest
+from unittest.mock import AsyncMock
+import re
 
 import discord
 
-import cogs.beckham_onboarding as engine
+import cogs.beckham_onboarding as cgk
 from cogs.beckham_onboarding import (
     CATEGORY_LIMIT,
     SETTING_KEYS,
@@ -20,6 +22,7 @@ from cogs.beckham_onboarding import (
     BeckhamOnboardingCog,
     BeckhamSettings,
     TaggedGroup,
+    can_close,
     channel_name,
     owner_from_topic,
     ticket_overwrites,
@@ -32,7 +35,9 @@ from views.beckham_onboarding_view import (
     BeckhamDraft,
     BeckhamOnboardingHubView,
     build_composer_embed,
+    SavedOnboardingOpenButton,
 )
+from views.creator_onboarding_view import OnboardingTicketView
 
 GUILD_ID = 1
 ROLE_ID = 700
@@ -99,14 +104,24 @@ class FakeTextChannel(discord.TextChannel):
         self.name = name
         self.topic = topic
         self.category = category
+        self.category_id = category.id if category is not None else None
         self.overwrites = overwrites or {}
         self.mention = f"<#{channel_id}>"
         self.guild = SimpleNamespace(id=GUILD_ID)
         self.sent = []
+        self.deleted = None
 
     async def send(self, **kwargs):
         self.sent.append(kwargs)
         return SimpleNamespace(jump_url=f"https://discord.test/{self.id}")
+
+    async def delete(self, *, reason=None):
+        self.deleted = reason
+
+    async def edit(self, *, category, overwrites, reason=None):
+        self.category = category
+        self.category_id = category.id
+        self.overwrites = overwrites
 
 
 class FakeMember:
@@ -156,6 +171,9 @@ class FakeGuild:
     def get_role(self, role_id):
         return next((role for role in self.roles if role.id == role_id), None)
 
+    def get_member(self, member_id):
+        return next((member for member in self.members if member.id == member_id), None)
+
     async def create_text_channel(self, name, *, category, overwrites, topic, reason):
         channel = FakeTextChannel(
             5000 + len(self.created), name, topic=topic, category=category, overwrites=overwrites
@@ -181,6 +199,18 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(owner_from_topic("General chat"))
         self.assertIsNone(owner_from_topic(None))
 
+    def test_owner_or_moderators_can_close(self):
+        def channel(permissions):
+            return SimpleNamespace(permissions_for=lambda member: permissions)
+
+        member = SimpleNamespace(id=42)
+        nobody = discord.Permissions.none()
+        self.assertTrue(can_close(member, channel(nobody), 42))
+        self.assertFalse(can_close(SimpleNamespace(id=7), channel(nobody), 42))
+        mod = channel(discord.Permissions(manage_messages=True))
+        self.assertTrue(can_close(SimpleNamespace(id=7), mod, 42))
+        self.assertFalse(can_close(member, mod, None))  # not an onboarding channel
+
     def test_only_member_staff_and_bot_can_see_the_channel(self):
         guild = FakeGuild()
         member = FakeMember(guild, 42, "lemon")
@@ -203,15 +233,16 @@ class BeckhamTestCase(unittest.IsolatedAsyncioTestCase):
         self.cog = BeckhamOnboardingCog.__new__(BeckhamOnboardingCog)
         self.cog.bot = None
         self.cog.db = self.db
-        self._pace = engine.CREATE_PACE_SECONDS
-        engine.CREATE_PACE_SECONDS = 0
-        self._defaults = dict(engine.ENV_DEFAULTS)
-        engine.ENV_DEFAULTS.update(category=CATEGORY_ID, role=ROLE_ID)
+        self.cog._selection_lock = asyncio.Lock()
+        self._pace = cgk.CREATE_PACE_SECONDS
+        cgk.CREATE_PACE_SECONDS = 0
+        self._defaults = dict(cgk.ENV_DEFAULTS)
+        cgk.ENV_DEFAULTS.update(category=CATEGORY_ID, role=ROLE_ID)
 
     async def asyncTearDown(self):
-        engine.CREATE_PACE_SECONDS = self._pace
-        engine.ENV_DEFAULTS.clear()
-        engine.ENV_DEFAULTS.update(self._defaults)
+        cgk.CREATE_PACE_SECONDS = self._pace
+        cgk.ENV_DEFAULTS.clear()
+        cgk.ENV_DEFAULTS.update(self._defaults)
         await self.db.close()
         self.tmp.cleanup()
 
@@ -226,6 +257,22 @@ class BeckhamTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class SettingsTests(BeckhamTestCase):
+    async def test_requested_beckham_category_and_completion_role(self):
+        category_id = 1559567789948141710
+        role_id = 1559568207495303279
+        await self.cog.set_value(GUILD_ID, "category", category_id)
+        await self.cog.set_value(GUILD_ID, "role", role_id)
+        guild = FakeGuild(category=FakeCategory(category_id))
+        guild.channels[category_id] = guild.category_channel
+        guild.access_role.id = role_id
+        member = FakeMember(guild, 42, "lemon")
+        await self.deliver(guild, [member], batch_id=1)
+        self.assertEqual(guild.created[0].category.id, category_id)
+        self.assertTrue(await self.cog.complete(member))
+        self.assertEqual([role.id for role in member.added], [role_id])
+        self.assertEqual(await self.db.get_setting(GUILD_ID, SETTING_KEYS["category"]), str(category_id))
+        self.assertEqual(await self.db.get_setting(GUILD_ID, SETTING_KEYS["role"]), str(role_id))
+
     async def test_defaults_then_saved_values(self):
         settings = await self.cog.settings(GUILD_ID)
         self.assertEqual((settings.category_id, settings.role_id), (CATEGORY_ID, ROLE_ID))
@@ -249,11 +296,24 @@ class SettingsTests(BeckhamTestCase):
 
 
 class TicketTests(BeckhamTestCase):
+    async def test_reused_channel_moves_to_requested_category(self):
+        guild = FakeGuild()
+        member = FakeMember(guild, 42, "lemon")
+        await self.deliver(guild, [member], batch_id=1)
+        category = FakeCategory(901)
+        guild.channels[901] = category
+        await self.cog.set_value(GUILD_ID, "category", 901)
+        result = await self.deliver(guild, [member], batch_id=2)
+        self.assertEqual(len(result.reused), 1)
+        self.assertEqual(result.reused[0].category_id, 901)
+        self.assertIs(result.reused[0].overwrites[guild.default_role].view_channel, False)
+
     async def test_open_creates_private_channel_and_tags_member(self):
         guild = FakeGuild()
         member = FakeMember(guild, 42, "lemon")
         result = await self.deliver(guild, [member], batch_id=1)
         self.assertEqual(len(result.created), 1)
+        self.assertEqual(result.member_ids, [42])
         channel = guild.created[0]
         self.assertEqual(channel.name, "lemon-onboarding")
         self.assertIs(channel.category, guild.category_channel)
@@ -262,6 +322,7 @@ class TicketTests(BeckhamTestCase):
         self.assertTrue(sent["content"].startswith(TICKET_INTRO.format(mention="<@42>")))
         self.assertTrue(sent["content"].endswith(WELCOME_MESSAGE))
         self.assertIn("unlock all of the server's channels", sent["content"])
+        self.assertIn("Got a question", sent["content"])
         self.assertEqual(sent["view"], "VIEW")
         self.assertEqual(await self.cog.owner_of(channel), 42)
 
@@ -340,9 +401,112 @@ class CompletionTests(BeckhamTestCase):
         member = FakeMember(guild, 42, "lemon")
         member.fail_add = True
         self.assertFalse(await self.cog.complete(member))
+        row = await self.db.fetchone("SELECT completed_at FROM beckham_onboarding_members WHERE user_id=? AND guild_id=?", (42, GUILD_ID))
+        self.assertIsNone(row)
         await self.cog.set_value(GUILD_ID, "role", 12345)  # a role that does not exist
         member.fail_add = False
         self.assertFalse(await self.cog.complete(member))
+
+
+class SavedOpenButtonTests(BeckhamTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.guild = FakeGuild()
+        self.member = FakeMember(self.guild, 42, "lemon")
+        self.guild.members = [self.member]
+        self.selection_id = "a" * 32
+        await self.cog.save_selection(self.selection_id, GUILD_ID, 9, [42])
+
+    def interaction(self, user_id=9):
+        return SimpleNamespace(
+            id=123, guild=self.guild,
+            user=SimpleNamespace(id=user_id, guild_permissions=SimpleNamespace(manage_guild=True)),
+            client=SimpleNamespace(get_cog=lambda name: self.cog if name=="BeckhamOnboardingCog" else None),
+            response=SimpleNamespace(is_done=lambda: True),
+            edit_original_response=AsyncMock(), followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+    async def recovered_button(self):
+        custom_id = f"beckham_onboarding_open:{self.selection_id}"
+        match = re.fullmatch(r"beckham_onboarding_open:(?P<selection_id>[a-f0-9]{32})", custom_id)
+        return await SavedOnboardingOpenButton.from_custom_id(None, None, match)
+
+    async def test_reconstructed_button_opens_saved_member_without_original_view(self):
+        button = await self.recovered_button()
+        interaction = self.interaction()
+        await button.callback(interaction)
+        self.assertEqual(len(self.guild.created), 1)
+        self.assertEqual(self.guild.created[0].category_id, CATEGORY_ID)
+        self.assertEqual(await self.cog.tagged_ids(GUILD_ID), {42})
+        self.assertIsNone(await self.cog.load_selection(self.selection_id, GUILD_ID))
+        self.assertIn("Onboarding channels opened", interaction.edit_original_response.call_args.kwargs["embeds"][0].title)
+
+    async def test_discord_dispatch_recovers_button_without_original_view_registered(self):
+        from discord.components import _component_factory
+        interaction = self.interaction()
+        button = SavedOnboardingOpenButton(self.selection_id)
+        interaction.message = SimpleNamespace(
+            id=999, flags=discord.MessageFlags(),
+            components=[_component_factory({"type": 1, "components": [button.item.to_component_dict()]})],
+        )
+        interaction.data = {"component_type": 2, "custom_id": button.custom_id}
+        async with discord.Client(intents=discord.Intents.none()) as client:
+            client.add_dynamic_items(SavedOnboardingOpenButton)
+            store = client._connection._view_store
+            self.assertEqual(store._views, {})
+            store.dispatch_view(2, button.custom_id, interaction)
+            await asyncio.gather(*store._ViewStore__tasks)
+        self.assertEqual(len(self.guild.created), 1)
+        self.assertEqual(self.guild.created[0].category_id, CATEGORY_ID)
+
+    async def test_wrong_moderator_cannot_open_saved_selection(self):
+        interaction = self.interaction(user_id=10)
+        await (await self.recovered_button()).callback(interaction)
+        self.assertEqual(self.guild.created, [])
+        interaction.followup.send.assert_awaited_once()
+        self.assertIsNotNone(await self.cog.load_selection(self.selection_id, GUILD_ID))
+
+    async def test_double_click_creates_only_one_channel(self):
+        first, second = await self.recovered_button(), await self.recovered_button()
+        await asyncio.gather(first.callback(self.interaction()), second.callback(self.interaction()))
+        self.assertEqual(len(self.guild.created), 1)
+        self.assertEqual(len(self.guild.created[0].sent), 1)
+
+    async def test_setup_failure_keeps_selection_for_retry(self):
+        self.guild.me.guild_permissions.manage_roles = False
+        await (await self.recovered_button()).callback(self.interaction())
+        self.assertEqual(self.guild.created, [])
+        self.assertIsNotNone(await self.cog.load_selection(self.selection_id, GUILD_ID))
+
+    async def test_selection_survives_database_reopen(self):
+        await self.db.close()
+        await self.db.initialize()
+        await (await self.recovered_button()).callback(self.interaction())
+        self.assertEqual(len(self.guild.created), 1)
+
+    async def test_saved_selection_cannot_be_loaded_by_another_guild(self):
+        self.assertIsNone(await self.cog.load_selection(self.selection_id, GUILD_ID+1))
+
+
+class CloseTests(BeckhamTestCase):
+    async def test_close_deletes_and_next_tag_opens_a_fresh_channel(self):
+        guild = FakeGuild()
+        member = FakeMember(guild, 42, "lemon")
+        await self.deliver(guild, [member], batch_id=1)
+        channel = guild.created[0]
+        await self.cog.close_ticket(channel, closed_by=member)
+        self.assertIn("closed by lemon", channel.deleted)
+        self.assertEqual((await self.cog.stats(guild))["channels"], 0)
+        self.assertEqual(await self.cog.owner_of(channel), 42)  # topic still names them
+        await self.cog.clear_last_group(GUILD_ID)
+        await self.deliver(guild, [member], batch_id=2)
+        self.assertEqual(len(guild.created), 2)
+
+    async def test_channel_deleted_by_hand_is_forgotten(self):
+        guild = FakeGuild()
+        await self.deliver(guild, [FakeMember(guild, 42, "lemon")], batch_id=1)
+        await self.cog.on_guild_channel_delete(guild.created[0])
+        self.assertEqual((await self.cog.stats(guild))["channels"], 0)
 
 
 class ComposerTests(unittest.TestCase):
@@ -387,6 +551,21 @@ class ComposerTests(unittest.TestCase):
 
         asyncio.run(check())
 
+    def test_ticket_view_has_answers_and_close(self):
+        async def check():
+            view = OnboardingTicketView()
+            self.assertTrue(view.is_persistent())
+            self.assertEqual(
+                {child.custom_id for child in view.children},
+                {
+                    "beckham_creator_onboarding:yes",
+                    "beckham_creator_onboarding:no",
+                    "beckham_onboarding:close",
+                },
+            )
+
+        asyncio.run(check())
+
     def test_hub_is_persistent(self):
         async def check():
             hub = BeckhamOnboardingHubView()
@@ -395,7 +574,9 @@ class ComposerTests(unittest.TestCase):
                 {child.custom_id for child in hub.children},
                 {
                     "beckham_onboarding_hub:scan",
+                    "beckham_onboarding_hub:single_member",
                     "beckham_onboarding_hub:test",
+                    "beckham_onboarding_hub:test_member",
                     "beckham_onboarding_hub:checkpoint",
                     "beckham_onboarding_hub:settings",
                     "beckham_onboarding_hub:stats",
@@ -404,6 +585,38 @@ class ComposerTests(unittest.TestCase):
 
         asyncio.run(check())
 
+    def test_single_member_selection_in_draft(self):
+        member1 = SimpleNamespace(id=1, display_name="Ann", joined_at=datetime.now(timezone.utc))
+        member2 = SimpleNamespace(id=2, display_name="Bob", joined_at=datetime.now(timezone.utc))
+        draft = BeckhamDraft(
+            user_id=7,
+            groups=[DayGroup("d0", "Joined today", "", [member1, member2])],
+            settings=BeckhamSettings(CATEGORY_ID, ROLE_ID, {"category": "env", "role": "env"}),
+            last_group=None,
+            problems=[],
+        )
+        self.assertEqual(len(draft.selected_members), 2)
+        draft.select_single_member(2)
+        self.assertEqual(len(draft.selected_members), 1)
+        self.assertEqual(draft.selected_members[0].id, 2)
+
+        view = BeckhamComposerView(draft)
+        self.assertEqual(view.send.label, "Open onboarding for Bob")
+
+        # Switching back to day selection clears single member mode
+        draft.apply_selection({"all"})
+        self.assertIsNone(draft.selected_member_id)
+        self.assertEqual(len(draft.selected_members), 2)
+
+    def test_test_member_select_view(self):
+        from views.beckham_onboarding_view import BeckhamTestMemberSelectView
+
+        view = BeckhamTestMemberSelectView()
+        self.assertEqual(len(view.children), 2)
+        self.assertTrue(any(isinstance(c, discord.ui.UserSelect) for c in view.children))
+        self.assertTrue(any(isinstance(c, discord.ui.Button) for c in view.children))
+
 
 if __name__ == "__main__":
     unittest.main()
+

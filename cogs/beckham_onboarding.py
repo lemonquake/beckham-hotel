@@ -8,7 +8,8 @@ onboarding category. Only that member and the server's moderators can see
 it. The member is tagged there with the creator questions (✅ YES / ❌ NO,
 then 🌱 / 🔥), the community rules and the Slack-connected questionnaire.
 Submitting the questionnaire grants the access role that unlocks the rest
-of the server.
+of the server. The member or any moderator can close the channel with its
+🔒 Close onboarding button, which deletes it.
 
 Every send is remembered as one "tagged group", so the most recent group can
 be cleared and tagged again from the scan screen.
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import logging
+import json
 import re
 import time
 from typing import Awaitable, Callable, Optional
@@ -40,8 +42,9 @@ logger = logging.getLogger("beckham_bot.beckham_onboarding")
 # Posted above the creator question in every onboarding channel.
 TICKET_INTRO = (
     "{mention} 🔒 This is your private onboarding channel — only you and the "
-    "Beckham Hotel team can see it. **Finish the onboarding below to unlock all of the "
-    "server's channels.**"
+    "Beckham team can see it. **Finish the onboarding below to unlock all of the "
+    "server's channels.** Got a question along the way? Just type it here and "
+    "the team will reply."
 )
 TOPIC_TEMPLATE = "Private Beckham onboarding for {member} · member ID {member_id}"
 _TOPIC_OWNER = re.compile(r"member ID (\d+)")
@@ -96,6 +99,7 @@ class TicketResult:
     created: list[discord.TextChannel] = field(default_factory=list)
     reused: list[discord.TextChannel] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)  # (member, reason)
+    member_ids: list[int] = field(default_factory=list)  # everyone tagged in a channel
 
     @property
     def opened(self) -> int:
@@ -117,6 +121,18 @@ def is_staff_role(role: discord.Role) -> bool:
     if role.is_default() or role.managed:
         return False
     permissions = role.permissions
+    return any(getattr(permissions, name, False) for name in STAFF_PERMISSIONS)
+
+
+def can_close(
+    member: discord.Member, channel: discord.abc.GuildChannel, owner_id: int | None
+) -> bool:
+    """The channel's own member, or anyone who moderates, may close it."""
+    if owner_id is None:
+        return False
+    if member.id == owner_id:
+        return True
+    permissions = channel.permissions_for(member)
     return any(getattr(permissions, name, False) for name in STAFF_PERMISSIONS)
 
 
@@ -154,6 +170,7 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = get_database(COMMUNITY_DATABASE_PATH)
+        self._selection_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
         await self.db.initialize()
@@ -176,6 +193,32 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
 
     async def set_value(self, guild_id: int, key: str, value: int | None) -> None:
         await self.db.set_setting(guild_id, SETTING_KEYS[key], str(value) if value else None)
+
+    async def save_selection(self, selection_id: str, guild_id: int, moderator_id: int, member_ids: list[int]) -> None:
+        await self.db.execute(
+            "INSERT INTO beckham_onboarding_selections VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(selection_id) DO UPDATE SET member_ids=excluded.member_ids, updated_at=excluded.updated_at",
+            (selection_id, guild_id, moderator_id, json.dumps(member_ids), time.time()),
+        )
+
+    async def load_selection(self, selection_id: str, guild_id: int):
+        return await self.db.fetchone(
+            "SELECT * FROM beckham_onboarding_selections WHERE selection_id=? AND guild_id=?",
+            (selection_id, guild_id),
+        )
+
+    async def delete_selection(self, selection_id: str, guild_id: int) -> None:
+        await self.db.execute(
+            "DELETE FROM beckham_onboarding_selections WHERE selection_id=? AND guild_id=?",
+            (selection_id, guild_id),
+        )
+
+    async def claim_selection(self, selection_id: str, guild_id: int):
+        async with self._selection_lock:
+            saved = await self.load_selection(selection_id, guild_id)
+            if saved is not None:
+                await self.delete_selection(selection_id, guild_id)
+            return saved
 
     @staticmethod
     def category(guild: discord.Guild, settings: BeckhamSettings) -> discord.CategoryChannel | None:
@@ -329,6 +372,13 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
                 topic=TOPIC_TEMPLATE.format(member=member, member_id=member.id),
                 reason=f"Beckham onboarding for {member} ({member.id})",
             )
+        elif channel.category_id != category.id:
+            if len(category.channels) >= CATEGORY_LIMIT:
+                raise CategoryFull()
+            await channel.edit(
+                category=category, overwrites=ticket_overwrites(guild, member),
+                reason="Move private onboarding to the configured category",
+            )
         await self._save_ticket(
             guild.id, member.id, channel.id, batch_id=batch_id, tagged_by=tagged_by
         )
@@ -369,6 +419,7 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
                 result.failed.append((member.display_name, str(exc.text or exc)[:80]))
             else:
                 (result.created if created else result.reused).append(channel)
+                result.member_ids.append(member.id)
             if progress is not None and index % PROGRESS_EVERY == 0 and index < total:
                 try:
                     await progress(index, total)
@@ -382,11 +433,46 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
         )
         return result
 
+    # -- closing -----------------------------------------------
+    async def forget_channel(self, guild_id: int, channel_id: int) -> None:
+        """Drops a deleted channel, so tagging that member again opens a new one."""
+        await self.db.execute(
+            "UPDATE beckham_onboarding_members SET channel_id = NULL "
+            "WHERE guild_id = ? AND channel_id = ?",
+            (guild_id, channel_id),
+        )
+
+    async def close_ticket(
+        self, channel: discord.TextChannel, *, closed_by: discord.abc.User
+    ) -> None:
+        """Deletes a member's onboarding channel."""
+        await channel.delete(reason=f"Onboarding channel closed by {closed_by} ({closed_by.id})")
+        await self.forget_channel(channel.guild.id, channel.id)
+        logger.info("Onboarding channel %s closed by %s", channel.id, closed_by.id)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        """A channel deleted by hand in Discord is forgotten too."""
+        try:
+            await self.forget_channel(channel.guild.id, channel.id)
+        except Exception:  # noqa: BLE001 - bookkeeping only
+            logger.warning("Could not forget deleted channel %s", channel.id, exc_info=True)
+
     # -- completion --------------------------------------------
     async def complete(self, member: discord.Member) -> bool:
         """Grants the access role and logs completion. False if it could not."""
         guild = member.guild
         settings = await self.settings(guild.id)
+        role = self.role(guild, settings)
+        if role is None:
+            logger.warning("Beckham onboarding access role %s not found", settings.role_id)
+            return False
+        if role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Completed Beckham onboarding")
+            except discord.HTTPException as exc:
+                logger.warning("Could not grant %s to %s: %s", role.id, member.id, exc)
+                return False
         await self.db.execute(
             """
             INSERT INTO beckham_onboarding_members (user_id, guild_id, completed_at)
@@ -395,17 +481,6 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
             """,
             (member.id, guild.id, time.time()),
         )
-        role = self.role(guild, settings)
-        if role is None:
-            logger.warning("Beckham onboarding access role %s not found", settings.role_id)
-            return False
-        if role in member.roles:
-            return True
-        try:
-            await member.add_roles(role, reason="Completed Beckham onboarding")
-        except discord.HTTPException as exc:
-            logger.warning("Could not grant %s to %s: %s", role.id, member.id, exc)
-            return False
         return True
 
     async def stats(self, guild: discord.Guild) -> dict[str, int]:

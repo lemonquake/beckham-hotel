@@ -17,6 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+from datetime import datetime, timezone
+import json
+import re
+import uuid
 
 import discord
 
@@ -32,7 +36,7 @@ from cogs.onboarding import DayGroup, missing_permissions
 from config import ONBOARDING_LOOKBACK_DAYS
 from utils import embed_builder
 from views.common import ack, missing_cog, replace_message, require_manage
-from views.creator_onboarding_view import CreatorWelcomeView, Shop101DoneView
+from views.creator_onboarding_view import OnboardingTicketView, Shop101DoneView
 
 logger = logging.getLogger("beckham_bot.beckham_onboarding_ui")
 
@@ -75,23 +79,54 @@ class BeckhamDraft:
     last_group: TaggedGroup | None
     problems: list[str]
     selected_keys: set[str] = field(default_factory=lambda: {"all"})
+    selected_member_id: int | None = None
     notice: tuple[str, str] | None = None
+    selection_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def apply_selection(self, keys: set[str]) -> None:
+        self.selected_member_id = None
         self.selected_keys = {"all"} if not keys or "all" in keys else keys
+
+    def select_single_member(self, member_id: int | None) -> None:
+        self.selected_member_id = member_id
 
     def is_active(self, key: str) -> bool:
         return "all" in self.selected_keys or key in self.selected_keys
 
     @property
+    def all_pending_members(self) -> list[discord.Member]:
+        seen: set[int] = set()
+        result: list[discord.Member] = []
+        for group in self.groups:
+            for member in group.members:
+                if member.id not in seen:
+                    seen.add(member.id)
+                    result.append(member)
+        return sorted(
+            result,
+            key=lambda m: getattr(m, "joined_at", None) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+
+    @property
     def selected_members(self) -> list[discord.Member]:
+        if self.selected_member_id is not None:
+            for member in self.all_pending_members:
+                if member.id == self.selected_member_id:
+                    return [member]
+            self.selected_member_id = None
+
         unique: dict[int, discord.Member] = {
             member.id: member
             for group in self.groups
             if self.is_active(group.key)
             for member in group.members
         }
-        return sorted(unique.values(), key=lambda m: m.joined_at, reverse=True)
+        return sorted(
+            unique.values(),
+            key=lambda m: getattr(m, "joined_at", None) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
 
     def inform(self, message: str, level: str = "info") -> None:
         self.notice = (level, message)
@@ -110,27 +145,44 @@ def build_composer_embed(draft: BeckhamDraft, guild: discord.Guild) -> discord.E
         lines += [f"{NOTICE_STYLES.get(level, 'ℹ️')} {text}", embed_builder.SEPARATOR]
 
     if draft.groups:
-        names = [member.display_name for member in members[:12]]
-        preview = ", ".join(names) if names else "No members selected yet"
-        if len(members) > 12:
-            preview += f" … and {len(members) - 12} more"
-        lines += [
-            embed_builder.section("Members") + f" **{len(members)}** selected",
-            preview,
-            "",
-            "\n".join(
-                embed_builder.item(
-                    f"**{group.label}** — {len(group.members)}"
-                    + ("  ✅" if draft.is_active(group.key) else "")
-                )
-                for group in draft.groups
-            ),
-        ]
+        if draft.selected_member_id is not None and members:
+            target = members[0]
+            joined_text = (
+                f" · Joined <t:{int(target.joined_at.timestamp())}:R>"
+                if getattr(target, "joined_at", None)
+                else ""
+            )
+            lines += [
+                embed_builder.section("Single member mode") + " **1** member selected",
+                embed_builder.item(f"Target: **{target.display_name}** ({target.mention}){joined_text}"),
+                embed_builder.item(f"Member ID: `{target.id}`"),
+                "",
+                "*(Only this single member will have an onboarding channel opened. "
+                "Select 'None' in the member menu or pick a join day to switch back)*",
+            ]
+        else:
+            names = [member.display_name for member in members[:12]]
+            preview = ", ".join(names) if names else "No members selected yet"
+            if len(members) > 12:
+                preview += f" … and {len(members) - 12} more"
+            lines += [
+                embed_builder.section("Members") + f" **{len(members)}** selected",
+                preview,
+                "",
+                "\n".join(
+                    embed_builder.item(
+                        f"**{group.label}** — {len(group.members)}"
+                        + ("  ✅" if draft.is_active(group.key) else "")
+                    )
+                    for group in draft.groups
+                ),
+            ]
     else:
         lines.append(
             f"✅ Everyone who joined in the last {ONBOARDING_LOOKBACK_DAYS} days "
             "has been tagged (or already has access)."
         )
+
 
     lines += [
         "",
@@ -171,16 +223,29 @@ async def _draft_for(interaction: discord.Interaction, user_id: int) -> BeckhamD
     cog = _cog(interaction)
     settings = await cog.settings(interaction.guild.id)
     pending = await cog.pending_members(interaction.guild, settings)
-    return BeckhamDraft(
+    draft = BeckhamDraft(
         user_id=user_id,
         groups=cog.group_by_day(pending),
         settings=settings,
         last_group=await cog.last_group(interaction.guild.id),
         problems=cog.setup_problems(interaction.guild, settings),
     )
+    await _save_selection(interaction, draft)
+    return draft
+
+
+async def _save_selection(interaction: discord.Interaction, draft: BeckhamDraft) -> None:
+    cog = _cog(interaction)
+    if cog is not None:
+        await cog.save_selection(
+            draft.selection_id, interaction.guild.id, draft.user_id,
+            [member.id for member in draft.selected_members],
+        )
 
 
 async def render_composer(interaction: discord.Interaction, draft: BeckhamDraft) -> None:
+    await ack(interaction)
+    await _save_selection(interaction, draft)
     await replace_message(
         interaction, build_composer_embed(draft, interaction.guild), BeckhamComposerView(draft)
     )
@@ -195,7 +260,7 @@ class BeckhamDaySelect(discord.ui.Select):
                 value="all",
                 emoji="✅",
                 description=f"All members from the last {ONBOARDING_LOOKBACK_DAYS} days",
-                default="all" in draft.selected_keys,
+                default="all" in draft.selected_keys and draft.selected_member_id is None,
             )
         ]
         for group in draft.groups[:24]:
@@ -205,7 +270,7 @@ class BeckhamDaySelect(discord.ui.Select):
                     value=group.key,
                     emoji="📅",
                     description=group.description[:100],
-                    default=group.key in draft.selected_keys,
+                    default=group.key in draft.selected_keys and draft.selected_member_id is None,
                 )
             )
         super().__init__(
@@ -222,14 +287,199 @@ class BeckhamDaySelect(discord.ui.Select):
         await render_composer(interaction, draft)
 
 
+class BeckhamSingleMemberSelect(discord.ui.Select):
+    """Select a specific single member from the new members list to onboard."""
+
+    def __init__(self, draft: BeckhamDraft):
+        pending = draft.all_pending_members
+        options = [
+            discord.SelectOption(
+                label="None (use join days above)",
+                value="none",
+                emoji="↩️",
+                description="Onboard members based on the join days selected above",
+                default=draft.selected_member_id is None,
+            )
+        ]
+        for member in pending[:24]:
+            joined_str = (
+                member.joined_at.strftime("%b %d, %H:%M")
+                if getattr(member, "joined_at", None)
+                else "recently"
+            )
+            name_tag = getattr(member, "name", getattr(member, "display_name", str(member.id)))
+            disp_name = getattr(member, "display_name", str(member.id))
+            options.append(
+                discord.SelectOption(
+                    label=disp_name[:100],
+                    value=str(member.id),
+                    emoji="👤",
+                    description=f"@{name_tag} · Joined {joined_str}"[:100],
+                    default=draft.selected_member_id == member.id,
+                )
+            )
+
+        super().__init__(
+            placeholder="Or onboard a single member from the list...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        draft: BeckhamDraft = self.view.draft  # type: ignore[attr-defined]
+        chosen = self.values[0]
+        if chosen == "none":
+            draft.select_single_member(None)
+        else:
+            draft.select_single_member(int(chosen))
+        await render_composer(interaction, draft)
+
+
+class BeckhamComposerMemberPickerView(discord.ui.View):
+    """Allows searching and selecting any member for single-member onboarding."""
+
+    def __init__(self, draft: BeckhamDraft, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.draft = draft
+
+    @discord.ui.select(
+        cls=discord.ui.UserSelect,
+        placeholder="Search for a member to onboard...",
+        min_values=1,
+        max_values=1,
+        row=0,
+    )
+    async def select_user(
+        self, interaction: discord.Interaction, select: discord.ui.UserSelect
+    ) -> None:
+        if not await require_manage(interaction):
+            return
+        if not select.values:
+            return
+        user = select.values[0]
+        member = interaction.guild.get_member(user.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(user.id)
+            except (discord.NotFound, discord.HTTPException):
+                await interaction.response.send_message(
+                    "That member could not be found in this server.", ephemeral=True
+                )
+                return
+        if member.bot:
+            await interaction.response.send_message(
+                "Bots can't be onboarded.", ephemeral=True
+            )
+            return
+
+        self.draft.select_single_member(member.id)
+        pending_ids = {m.id for m in self.draft.all_pending_members}
+        if member.id not in pending_ids:
+            self.draft.groups.insert(0, DayGroup("custom", "Selected member", "", [member]))
+
+        self.draft.inform(f"Selected **{member.display_name}** for single-member onboarding.", "success")
+        await render_composer(interaction, self.draft)
+
+    @discord.ui.button(label="Back to scan", style=discord.ButtonStyle.secondary, emoji="⬅️", row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await render_composer(interaction, self.draft)
+
+
+class SavedOnboardingOpenButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"beckham_onboarding_open:(?P<selection_id>[a-f0-9]{32})",
+):
+    """Open a saved selection even when its original View no longer exists."""
+
+    def __init__(self, selection_id: str):
+        super().__init__(discord.ui.Button(
+            label="Open onboarding channels", style=discord.ButtonStyle.success,
+            emoji="🎟️", row=2, custom_id=f"beckham_onboarding_open:{selection_id}",
+        ))
+        self.selection_id = selection_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match[str]):
+        return cls(match["selection_id"])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        try:
+            await self._open(interaction)
+        except Exception:
+            logger.exception("Saved onboarding button failed for selection %s", self.selection_id)
+            await ack(interaction)
+            await replace_message(interaction, embed_builder.error_embed(
+                "Could not open onboarding",
+                "The action failed. Open a new scan and try again; the details are saved in logs/beckham.log.",
+            ), None)
+
+    async def _open(self, interaction: discord.Interaction) -> None:
+        if not await require_manage(interaction):
+            return
+        await ack(interaction)
+        cog = _cog(interaction)
+        if cog is None:
+            await missing_cog(interaction, "Beckham Onboarding")
+            return
+        saved = await cog.load_selection(self.selection_id, interaction.guild.id)
+        if saved is None:
+            await replace_message(interaction, embed_builder.info_embed(
+                "Open a new scan", "This selection was already used or cancelled. Open Beckham Onboarding to select members again."
+            ), None)
+            return
+        if saved["moderator_id"] != interaction.user.id:
+            await interaction.followup.send("This selection belongs to another moderator. Open your own scan.", ephemeral=True)
+            return
+        members = []
+        for member_id in json.loads(saved["member_ids"]):
+            member = interaction.guild.get_member(member_id)
+            if member is None:
+                try:
+                    member = await interaction.guild.fetch_member(member_id)
+                except discord.NotFound:
+                    continue
+                except discord.HTTPException:
+                    await replace_message(interaction, embed_builder.error_embed(
+                        "Could not load members", "Discord could not load the selection. Try the Open button again."
+                    ), None)
+                    return
+            if not member.bot:
+                members.append(member)
+        settings = await cog.settings(interaction.guild.id)
+        draft = BeckhamDraft(
+            user_id=interaction.user.id,
+            groups=[DayGroup("saved", "Selected members", "", members)] if members else [],
+            settings=settings, last_group=await cog.last_group(interaction.guild.id),
+            problems=cog.setup_problems(interaction.guild, settings),
+            selection_id=self.selection_id,
+        )
+        if len(members) == 1:
+            draft.select_single_member(members[0].id)
+        logger.info("Opening saved onboarding selection %s for %s members in guild %s", self.selection_id, len(members), interaction.guild.id)
+        await _execute_delivery(interaction, BeckhamComposerView(draft))
+
+
 class BeckhamComposerView(discord.ui.View):
     def __init__(self, draft: BeckhamDraft):
         super().__init__(timeout=COMPOSER_TIMEOUT)
         self.draft = draft
+        opener = SavedOnboardingOpenButton(draft.selection_id)
+        self.add_item(opener)
+        self.send = opener.item
         if draft.groups:
             self.add_item(BeckhamDaySelect(draft))
+            if draft.all_pending_members:
+                self.add_item(BeckhamSingleMemberSelect(draft))
         count = len(draft.selected_members)
-        self.send.label = f"Open {count} onboarding channel{'s' if count != 1 else ''}"
+        if draft.selected_member_id is not None and count == 1:
+            member = draft.selected_members[0]
+            disp = getattr(member, "display_name", str(member.id))
+            self.send.label = f"Open onboarding for {disp[:20]}"
+        else:
+            self.send.label = f"Open {count} onboarding channel{'s' if count != 1 else ''}"
+
         self.send.disabled = count == 0 or bool(draft.problems)
         self.clear_and_rescan.disabled = draft.last_group is None
 
@@ -245,16 +495,27 @@ class BeckhamComposerView(discord.ui.View):
             return False
         return await require_manage(interaction)
 
-    @discord.ui.button(label="Open onboarding channels", style=discord.ButtonStyle.success, emoji="🎟️", row=1)
-    async def send(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await ack(interaction)
-        await _execute_delivery(interaction, self)
+    @discord.ui.button(label="Find member", style=discord.ButtonStyle.secondary, emoji="🔍", row=2)
+    async def search_member(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await require_manage(interaction):
+            return
+        await replace_message(
+            interaction,
+            embed_builder.base_embed(
+                title="🔍  Select a Member to Onboard",
+                description=(
+                    f"{embed_builder.SEPARATOR}\n"
+                    "Search and select any member to onboard individually in a private channel."
+                ),
+            ),
+            BeckhamComposerMemberPickerView(self.draft),
+        )
 
     @discord.ui.button(
         label="Clear last tagged group & rescan",
         style=discord.ButtonStyle.secondary,
         emoji="♻️",
-        row=1,
+        row=2,
     )
     async def clear_and_rescan(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await ack(interaction)
@@ -271,12 +532,16 @@ class BeckhamComposerView(discord.ui.View):
         )
         await render_composer(interaction, draft)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️", row=1)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cog = _cog(interaction)
+        if cog is not None:
+            await cog.delete_selection(self.draft.selection_id, interaction.guild.id)
         await replace_message(
             interaction, embed_builder.info_embed("Cancelled", "Nothing was sent."), None
         )
         self.stop()
+
 
     async def on_error(
         self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
@@ -327,6 +592,13 @@ async def _execute_delivery(interaction: discord.Interaction, view: BeckhamCompo
         await render_composer(interaction, draft)
         return
 
+    saved = await cog.claim_selection(draft.selection_id, interaction.guild.id)
+    if saved is None:
+        await replace_message(interaction, embed_builder.info_embed(
+            "Selection already used", "Open a new scan to select members again."
+        ), None)
+        return
+
     def working(done: int = 0) -> discord.Embed:
         return embed_builder.info_embed(
             "Opening onboarding channels...",
@@ -346,7 +618,7 @@ async def _execute_delivery(interaction: discord.Interaction, view: BeckhamCompo
             members=members,
             moderator=interaction.user,
             batch_id=interaction.id,
-            view_factory=CreatorWelcomeView,
+            view_factory=OnboardingTicketView,
             progress=progress,
         )
     except (ValueError, discord.HTTPException) as exc:
@@ -379,7 +651,7 @@ def build_settings_embed(
         lines += ["", embed_builder.section("Needs attention"), *_problem_lines(problems)]
     lines += [
         embed_builder.SEPARATOR,
-        "The TikTok Shop 101 and support-ticket links are set in **👋 Onboarding → ⚙️ Settings**.",
+        "The TikTok Shop 101 link is set in **👋 Onboarding → ⚙️ Settings**.",
     ]
     return embed_builder.base_embed(title="⚙️  Beckham Onboarding settings", description="\n".join(lines))
 
@@ -453,6 +725,119 @@ class BeckhamSettingsView(discord.ui.View):
         self.stop()
 
 
+async def open_test_channel(interaction: discord.Interaction, member: discord.Member) -> None:
+    """
+    Opens (or re-tags) a private onboarding channel for one member as a test.
+
+    The member is not added to any tagged group, so scans still list them.
+    Replies privately.
+    """
+    cog = _cog(interaction)
+    if cog is None:
+        await missing_cog(interaction, "Beckham Onboarding")
+        return
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    settings = await cog.settings(interaction.guild.id)
+    problems = cog.setup_problems(interaction.guild, settings)
+    category = cog.category(interaction.guild, settings)
+    if category is None or any("Manage Channels" in problem for problem in problems):
+        await interaction.followup.send(
+            embed=embed_builder.error_embed("Fix the setup first", "\n".join(_problem_lines(problems))),
+            ephemeral=True,
+        )
+        return
+    try:
+        channel, created = await cog.open_ticket(
+            member, category, OnboardingTicketView(), batch_id=None, tagged_by=None
+        )
+    except CategoryFull:
+        await interaction.followup.send(
+            embed=embed_builder.error_embed(
+                "Could not open the test channel",
+                f"The **{category.name}** category is full ({CATEGORY_LIMIT} channels).",
+            ),
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as exc:
+        await interaction.followup.send(
+            embed=embed_builder.error_embed("Could not open the test channel", str(exc)[:500]),
+            ephemeral=True,
+        )
+        return
+    yourself = member.id == interaction.user.id
+    who = "you" if yourself else member.mention
+    lines = [
+        embed_builder.item(
+            f"{'Opened' if created else 'Re-tagged ' + who + ' in'} {channel.mention}"
+            + (" — click through it like a new member would." if yourself else ".")
+        ),
+        embed_builder.item(
+            "Submitting the questionnaire really saves the answers for Slack and grants the access role."
+        ),
+        embed_builder.item(
+            "Not added to any tagged group. Press **🔒 Close onboarding** in the channel when done."
+        ),
+    ]
+    if problems:
+        lines += ["", *_problem_lines(problems)]
+    await interaction.followup.send(
+        embed=embed_builder.success_embed("Test channel ready", "\n".join(lines)),
+        ephemeral=True,
+        allowed_mentions=NO_MENTIONS,
+    )
+
+
+class BeckhamTestMemberSelectView(discord.ui.View):
+    """Allows a moderator to select any member to test the onboarding flow."""
+
+    def __init__(self, timeout: float = 300):
+        super().__init__(timeout=timeout)
+
+    @discord.ui.select(
+        cls=discord.ui.UserSelect,
+        placeholder="Select a member to test onboarding on...",
+        min_values=1,
+        max_values=1,
+        row=0,
+    )
+    async def select_member(
+        self, interaction: discord.Interaction, select: discord.ui.UserSelect
+    ) -> None:
+        if not await require_manage(interaction):
+            return
+        if not select.values:
+            return
+        user = select.values[0]
+        member = interaction.guild.get_member(user.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(user.id)
+            except (discord.NotFound, discord.HTTPException):
+                await interaction.response.send_message(
+                    "That member could not be found in this server.", ephemeral=True
+                )
+                return
+        if member.bot:
+            await interaction.response.send_message(
+                "Bots can't be onboarded.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await open_test_channel(interaction, member)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️", row=1)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await replace_message(
+            interaction, embed_builder.info_embed("Cancelled", "Test onboarding was cancelled."), None
+        )
+        self.stop()
+
+
 # ── Persistent hub ─────────────────────────────────────────────────────────
 async def build_beckham_hub_embed(interaction: discord.Interaction) -> discord.Embed:
     cog = _cog(interaction)
@@ -466,13 +851,6 @@ async def build_beckham_hub_embed(interaction: discord.Interaction) -> discord.E
     problems = cog.setup_problems(guild, settings)
     creator = interaction.client.get_cog("CreatorOnboardingCog")
     answers = await creator.stats(guild) if creator else None
-    links = (await creator.settings(guild.id)).channels if creator else {}
-
-    def link_line(label: str, key: str, missing: str) -> str:
-        channel_id = links.get(key)
-        return embed_builder.item(
-            f"**{label}:** " + (f"<#{channel_id}>" if channel_id else f"⚠️ *not set* — {missing}")
-        )
 
     blocks = [
         "Give every new member a private **#handle-onboarding** channel, tag them "
@@ -483,7 +861,7 @@ async def build_beckham_hub_embed(interaction: discord.Interaction) -> discord.E
         "\n".join(
             [
                 embed_builder.item(f"Waiting to be tagged: **{stats['pending']}**"),
-                embed_builder.item(f"Onboarding channels opened: **{stats['channels']}**"),
+                embed_builder.item(f"Open onboarding channels: **{stats['channels']}**"),
                 embed_builder.item(f"Finished onboarding: **{stats['completed']}**"),
             ]
         ),
@@ -502,15 +880,17 @@ async def build_beckham_hub_embed(interaction: discord.Interaction) -> discord.E
         embed_builder.section("Setup"),
         embed_builder.item(f"**Category:** {_category_line(guild, settings)}"),
         embed_builder.item(f"**Access role:** {_role_line(settings)}"),
-        link_line("TikTok Shop 101", "getting_started", "set it in **👋 Onboarding → ⚙️ Settings**"),
-        link_line("Support tickets", "support", "set it in **👋 Onboarding → ⚙️ Settings**"),
         *_problem_lines(problems),
         "",
         embed_builder.section("How to use it"),
-        embed_builder.item("**🧪 Test on myself** opens an onboarding channel for you to click through."),
         embed_builder.item(
-            "**🔍 Scan** groups recent members by join day — pick the days and "
-            "press **Open onboarding channels**."
+            "**🧪 Test on myself / member** (or `/test-onboarding`) opens a test channel to click through."
+        ),
+        embed_builder.item(
+            "**🔒 Close onboarding** in a channel lets the member or any moderator delete it."
+        ),
+        embed_builder.item(
+            "**🔍 Scan** groups recent members by join day — or select a **single member** to onboard individually."
         ),
         embed_builder.item(
             "**📌 Post Shop 101 checkpoint** adds an *I've finished TikTok Shop 101* "
@@ -549,6 +929,43 @@ class BeckhamOnboardingHubView(discord.ui.View):
         )
 
     @discord.ui.button(
+        label="Onboard single member",
+        style=discord.ButtonStyle.success,
+        custom_id="beckham_onboarding_hub:single_member",
+        emoji="👤",
+        row=0,
+    )
+    async def single_member(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await require_manage(interaction):
+            return
+        if _cog(interaction) is None:
+            await missing_cog(interaction, "Beckham Onboarding")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        draft = await _draft_for(interaction, interaction.user.id)
+        if not draft.all_pending_members:
+            await interaction.followup.send(
+                embed=embed_builder.info_embed(
+                    "No pending new members",
+                    f"Everyone who joined in the last {ONBOARDING_LOOKBACK_DAYS} days "
+                    "has already been tagged or finished onboarding.",
+                ),
+                ephemeral=True,
+            )
+            return
+        draft.select_single_member(draft.all_pending_members[0].id)
+        draft.inform(
+            f"Selected **{draft.all_pending_members[0].display_name}**. Use the dropdown to choose another member.",
+            "info",
+        )
+        await interaction.followup.send(
+            embed=build_composer_embed(draft, interaction.guild),
+            view=BeckhamComposerView(draft),
+            ephemeral=True,
+            allowed_mentions=NO_MENTIONS,
+        )
+
+    @discord.ui.button(
         label="Test on myself",
         style=discord.ButtonStyle.primary,
         custom_id="beckham_onboarding_hub:test",
@@ -563,48 +980,35 @@ class BeckhamOnboardingHubView(discord.ui.View):
             await missing_cog(interaction, "Beckham Onboarding")
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        settings = await cog.settings(interaction.guild.id)
-        problems = cog.setup_problems(interaction.guild, settings)
-        category = cog.category(interaction.guild, settings)
-        if category is None or any("Manage Channels" in problem for problem in problems):
-            await interaction.followup.send(
-                embed=embed_builder.error_embed("Fix the setup first", "\n".join(_problem_lines(problems))),
-                ephemeral=True,
-            )
+        await open_test_channel(interaction, interaction.user)
+
+    @discord.ui.button(
+        label="Test on member",
+        style=discord.ButtonStyle.primary,
+        custom_id="beckham_onboarding_hub:test_member",
+        emoji="🧪",
+        row=0,
+    )
+    async def test_member(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await require_manage(interaction):
             return
-        try:
-            channel, created = await cog.open_ticket(
-                interaction.user, category, CreatorWelcomeView(), batch_id=None, tagged_by=None
-            )
-        except CategoryFull:
-            await interaction.followup.send(
-                embed=embed_builder.error_embed(
-                    "Could not open the test channel",
-                    f"The **{category.name}** category is full ({CATEGORY_LIMIT} channels).",
-                ),
-                ephemeral=True,
-            )
+        cog = _cog(interaction)
+        if cog is None:
+            await missing_cog(interaction, "Beckham Onboarding")
             return
-        except discord.HTTPException as exc:
-            await interaction.followup.send(
-                embed=embed_builder.error_embed("Could not open the test channel", str(exc)[:500]),
-                ephemeral=True,
-            )
-            return
-        lines = [
-            embed_builder.item(
-                f"{'Opened' if created else 'Re-tagged you in'} {channel.mention} — click through it like a new member would."
+        embed = embed_builder.base_embed(
+            title="🧪  Test Beckham Onboarding on a Member",
+            description=(
+                f"{embed_builder.SEPARATOR}\n"
+                "Select any member from the menu below to open a private test onboarding "
+                "channel for them without adding them to a tagged group.\n\n"
+                f"{embed_builder.item('A private **#<handle>-onboarding** channel will be opened.')}\n"
+                f"{embed_builder.item('They will be tagged with the creator questions.')}\n"
+                f"{embed_builder.item('Use **🔒 Close onboarding** inside the channel when finished.')}"
             ),
-            embed_builder.item(
-                "Submitting the questionnaire really saves your answers for Slack and grants the access role."
-            ),
-            embed_builder.item("You were not added to any tagged group. Delete the channel when you're done."),
-        ]
-        if problems:
-            lines += ["", *_problem_lines(problems)]
-        await interaction.followup.send(
-            embed=embed_builder.success_embed("Test channel ready", "\n".join(lines)),
-            ephemeral=True,
+        )
+        await interaction.response.send_message(
+            embed=embed, view=BeckhamTestMemberSelectView(), ephemeral=True
         )
 
     @discord.ui.button(
@@ -612,7 +1016,7 @@ class BeckhamOnboardingHubView(discord.ui.View):
         style=discord.ButtonStyle.secondary,
         custom_id="beckham_onboarding_hub:checkpoint",
         emoji="📌",
-        row=0,
+        row=1,
     )
     async def checkpoint(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await require_manage(interaction):
@@ -696,11 +1100,16 @@ class BeckhamOnboardingHubView(discord.ui.View):
 
 
 __all__ = [
+    "BeckhamComposerMemberPickerView",
     "BeckhamComposerView",
     "BeckhamDraft",
     "BeckhamOnboardingHubView",
     "BeckhamSettingsView",
+    "BeckhamSingleMemberSelect",
+    "BeckhamTestMemberSelectView",
     "build_beckham_hub_embed",
     "build_composer_embed",
     "build_settings_embed",
+    "open_test_channel",
 ]
+

@@ -185,13 +185,13 @@ Two optional shortcuts post standalone panels for teams that prefer them: `/onbo
 
 **First-time setup:**
 
-1. **👋 Onboarding → ⚙️ Settings** — already points to the **information channel** (`1553106965922578595`, where 🌱 creators are sent) and the **support-ticket channel** (`1549416221995307058`, linked in the community rules). Change them there only if they move. Optionally pick a default welcome channel for the public post.
-2. **🎟️ Beckham Onboarding → ⚙️ Settings** — pick the **onboarding category** (where the private channels are created) and the **access role** (granted when a member finishes).
+1. **👋 Onboarding → ⚙️ Settings** — already points to the **information channel** (`1553106965922578595`, where 🌱 creators are sent) and the **support-ticket channel** (`1549416221995307058`, linked in the community rules). Change them there only if they move. Optionally pick a default test channel or the opportunities channel linked after completion.
+2. **🎟️ Beckham Onboarding → ⚙️ Settings** — The **onboarding category** is `1559567789948141710`, and the **Member access role** granted after the questionnaire is `1559568207495303279`. Both are saved for the Beckham server and can be changed here.
 3. In *Server Settings → Roles*, put the bot's role **above** the access role, and give the bot **Manage Channels** and **Manage Roles**. The hub lists anything still missing.
 
 **Using it:**
 
-1. Click **🧪 Test on myself**. The bot opens an onboarding channel for you, so you can click through the whole flow. Submitting the questionnaire really saves your answers for Slack and grants the role. Delete the channel when you're done.
+1. Click **🧪 Test on myself**. The bot opens an onboarding channel for you, so you can click through the whole flow. Submitting the questionnaire really saves your answers for Slack and grants the role. Use **🔒 Close onboarding** when you finish. **Test on member** lets you choose someone else; `/test-onboarding [member]` opens the same test flow.
 2. Click **🔍 Scan for new members**. Members who joined in the last 30 days, haven't been tagged yet, don't hold an excluded role and don't already have the access role are grouped by join day. Pick the days and press **🎟️ Open N onboarding channels**.
 3. Need to tag a group again? Scan, then press **♻️ Clear last tagged group & rescan**. Tagging them again re-uses their existing channels.
 4. *(Optional)* **📌 Post Shop 101 checkpoint** posts an *I've finished TikTok Shop 101* button in the TikTok Shop 101 channel.
@@ -210,7 +210,7 @@ to unlock all of the server's channels.
 Questionnaire submitted → answers saved and sent to Slack, access role granted
 ```
 
-Only the channel's member can answer in it. A category holds at most **50** channels, so delete finished onboarding channels from time to time. The **👋 Onboarding** button runs the same questions as one public post with private (ephemeral) replies.
+Only the channel's member can answer in it. A category holds at most **50** channels, so delete finished onboarding channels from time to time. The **👋 Onboarding** button also opens one private channel per member. Its **Test message** control can post the questions to a shared channel with private replies. **Close onboarding** asks for confirmation and deletes the channel; only its member or a moderator can close it. Buttons remain registered after a restart.
 
 ---
 
@@ -476,3 +476,17 @@ Created by **Aljay Leodones** for **Beckham Hotel**.
 Use `/onboarding` or the mod panel Onboarding button to publish the member form in Introduce Yourself. The five questions collect TikTok handle, email, phone number, last 30 days TikTok GMV, and an optional birthday. The member's Discord account is captured automatically. Responses are saved locally and sent to the brand's private Slack channel.
 
 See [SLACK_ONBOARDING_SETUP.md](SLACK_ONBOARDING_SETUP.md) for admin installation steps, private webhook configuration, connection testing, and delivery troubleshooting.
+
+
+## Role Giver
+
+Open **Role Giver** from `/summon` or `/role-giver`. Choose the target role, optionally exclude other roles, and review the bot/admin filters. The member list refreshes when you select a role or change a filter. **Give Role** shows a confirmation before assigning anything. Progress reports successes and failures, and **Cancel Assignment** stops the remaining work.
+
+When **Give Role** is disabled, the reason appears at the top of the panel. The bot needs Manage Roles or Administrator permission, and its highest role must be above the chosen role. Administrator does not override Discord's role order. If Member or Verified is blocked, move **Beckham Hotel Bot** above the target role to allow assignment. This also applies when onboarding grants Member. Managed integration roles and @everyone cannot be assigned. If no members are eligible, review the exclusions and members who already have the role. An incomplete member scan blocks assignment until it can be retried.
+
+Restart the Beckham bot after updating these files. Open a fresh Role Giver panel after the restart. Run the regression suite with `venv\Scripts\python.exe -m unittest discover -s tests`.
+
+
+### Onboarding selection recovery
+
+The Open onboarding button now saves the selected member IDs in SQLite and restores them after a panel timeout or bot restart. Each selection can be used once and is restricted to the moderator who created it. Select a member again in a fresh panel after installing this update; panels created by older versions use the old button IDs. Reused onboarding channels move to the configured onboarding category when it changes. Completion is recorded only after the Member role is present or successfully granted. Errors are written to `logs/beckham.log`.

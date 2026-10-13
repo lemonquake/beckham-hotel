@@ -32,12 +32,15 @@ from views.onboarding_view import (
     open_questionnaire_poster,
 )
 from views.plain_message_view import PlainMessageModal
+from views.role_giver_view import open_role_giver
 
 logger = logging.getLogger("beckham_bot.mod_panel_ui")
 
+FIELD_LIMIT = 1024
+
 FUNCTION_GUIDE = [
-    ("🎟️ Beckham Onboarding", "Scan new members and open a private #handle-onboarding channel for each — finishing it unlocks the server. 🧪 Test it on yourself."),
-    ("👋 Onboarding", "Tag new members with the TikTok Shop creator question (✅ YES / ❌ NO). 🧪 Test it in any channel."),
+    ("🎟️ Beckham Onboarding", "Scan new members and open a private #handle-onboarding channel for each — finishing it unlocks the server. 🧪 Test it on yourself or a member with /test-onboarding; 🔒 Close onboarding deletes a channel."),
+    ("👋 Onboarding", "Open private onboarding channels and tag new members with the TikTok Shop creator question (✅ YES / ❌ NO). 🧪 Test it in any channel."),
     ("ℹ️ Information Onboarding", "Welcome new members with a tagged post and warm DM, plus the member questionnaire."),
     ("📊 Community Reports", "Growth reports that refresh themselves in a channel."),
     ("📈 Engagement Report", "Rank members by messages, reactions and threads."),
@@ -46,6 +49,7 @@ FUNCTION_GUIDE = [
     ("📝 Embed Message", "Compose, save and reuse branded embeds — templates included."),
     ("💬 Normal Message", "Write a plain message, preview it, edit it, attach images, then post."),
     ("📋 Post Questionnaire", "Post the member questionnaire (Start onboarding) in any channel, as many times as you like."),
+    ("👥 Role Giver", "Assign a role to all members in bulk, with filters to exclude bots, admins, or other roles."),
     ("🔄 Refresh Dashboard", "Reload this panel with the latest data and buttons."),
 ]
 
@@ -227,14 +231,22 @@ async def build_mod_panel_embed(
                 inline=False,
             )
 
-    embed.add_field(
-        name=embed_builder.section("What each button does"),
-        value="\n".join(
-            embed_builder.item(f"**{label}** — {description}")
-            for label, description in FUNCTION_GUIDE
-        ),
-        inline=False,
-    )
+    # A field holds at most 1024 characters, so the guide spills into more.
+    guide = [
+        embed_builder.item(f"**{label}** — {description}")
+        for label, description in FUNCTION_GUIDE
+    ]
+    chunks: list[list[str]] = [[]]
+    for line in guide:
+        if chunks[-1] and len("\n".join(chunks[-1] + [line])) > FIELD_LIMIT:
+            chunks.append([])
+        chunks[-1].append(line)
+    for index, chunk in enumerate(chunks):
+        embed.add_field(
+            name=embed_builder.section("What each button does") if index == 0 else "\u200b",
+            value="\n".join(chunk),
+            inline=False,
+        )
 
     embed.add_field(
         name=embed_builder.section("System health"),
@@ -462,7 +474,22 @@ class ModPanelView(discord.ui.View):
             return
         await open_questionnaire_poster(interaction)
 
-    # ── Row 3: maintenance ────────────────────────────────────
+    # ── Row 3: tools & maintenance ────────────────────────────
+    @discord.ui.button(
+        label="Role Giver",
+        style=discord.ButtonStyle.primary,
+        custom_id="beckham_mod_panel:role_giver",
+        emoji="👥",
+        row=3,
+    )
+    async def role_giver_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        """Opens the Role Giver tool to assign roles in bulk with filters."""
+        if not await require_manage(interaction):
+            return
+        await open_role_giver(interaction)
+
     @discord.ui.button(
         label="Refresh Dashboard",
         style=discord.ButtonStyle.secondary,

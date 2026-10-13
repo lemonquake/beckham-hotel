@@ -66,6 +66,15 @@ CREATE INDEX IF NOT EXISTS idx_beckham_onboarding_channel
 CREATE INDEX IF NOT EXISTS idx_beckham_onboarding_batch
     ON beckham_onboarding_members (guild_id, batch_id);
 
+-- Saved moderator selections let the Open button survive restarts/timeouts.
+CREATE TABLE IF NOT EXISTS beckham_onboarding_selections (
+    selection_id TEXT PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    moderator_id INTEGER NOT NULL,
+    member_ids TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 -- ── Daily member snapshots (growth baselines) ───────────────
 CREATE TABLE IF NOT EXISTS member_snapshots (
     guild_id      INTEGER NOT NULL,
