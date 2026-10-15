@@ -112,7 +112,7 @@ CHANNEL_LABELS = {
     "opportunities": "Opportunities channel",
 }
 CHANNEL_HINTS = {
-    "opportunities": "Linked in the message members receive after completing onboarding.",
+    "opportunities": "Where members can see all the ways to earn after completing onboarding.",
     "welcome": "Pre-selected for test messages. Real welcomes go to each member's private onboarding channel.",
     "getting_started": (
         "Where 🌱 learning creators are sent (TikTok Shop 101). Unset = the "
@@ -176,23 +176,26 @@ def next_step_message(guild: discord.Guild | None, support_channel_id: int | Non
     return NEXT_STEP_MESSAGE.format(support=support)
 
 
-OPPORTUNITIES_NAME = "opportunities-to-earn"
+OPPORTUNITIES_CHANNEL_ID = 1559622381302190181
+OPPORTUNITIES_CHANNEL_URL = (
+    "https://discord.com/channels/1546233619884941503/1559622381302190181"
+)
 COMPLETION_MESSAGE = (
-    "You now have full access to the Beckham Hotel creator community! Head to {channel} "
-    "to see all the ways you can earn with us. 🎉"
+    "🎉 Congratulations! You've completed onboarding and now have full access "
+    "to the Beckham Hotel server. Head to {channel} "
+    "to see all the ways you can earn with us!"
 )
 
 def completion_message(guild: discord.Guild | None, channel_id: int | None) -> str:
-    """The "you now have full access" message, linking #opportunities-to-earn."""
-    if channel_id is None and guild is not None:
-        found = discord.utils.get(getattr(guild, "text_channels", []), name=OPPORTUNITIES_NAME)
-        channel_id = found.id if found is not None else None
-    if channel_id and guild is not None:
-        channel = _channel_link(guild, channel_id)
-    elif channel_id:
-        channel = f"<#{channel_id}>"
+    """Links earning opportunities, correcting the previous affiliate-chat destination."""
+    channel_id = channel_id or CREATOR_OPPORTUNITIES_CHANNEL_ID or OPPORTUNITIES_CHANNEL_ID
+    if channel_id in (1549413913727209522, OPPORTUNITIES_CHANNEL_ID):
+        channel = (
+            "[**All the Ways to Earn with Beckham Hotel Collection**]"
+            f"({OPPORTUNITIES_CHANNEL_URL})"
+        )
     else:
-        channel = f"**#{OPPORTUNITIES_NAME}**"
+        channel = _channel_link(guild, channel_id)
     return COMPLETION_MESSAGE.format(channel=channel)
 
 

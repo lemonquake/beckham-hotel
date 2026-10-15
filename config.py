@@ -113,7 +113,10 @@ CREATOR_GETTING_STARTED_CHANNEL_ID = _optional_int(
 )
 CREATOR_SUPPORT_CHANNEL_ID = _optional_int("CREATOR_SUPPORT_CHANNEL_ID", "1549416221995307058")
 
-CREATOR_OPPORTUNITIES_CHANNEL_ID = _optional_int("CREATOR_OPPORTUNITIES_CHANNEL_ID")
+# Opportunities channel linked after onboarding.
+CREATOR_OPPORTUNITIES_CHANNEL_ID = _optional_int(
+    "CREATOR_OPPORTUNITIES_CHANNEL_ID", "1559622381302190181"
+)
 
 # Beckham Onboarding: each new member gets a private "<handle>-onboarding"
 # channel in this category, and finishing the questionnaire there grants the

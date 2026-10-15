@@ -356,9 +356,10 @@ class FakeGuildMember(discord.Object):
 
 
 FULL_ACCESS = (
-    "You now have full access to the Beckham Hotel creator community! Head to "
-    "**#opportunities-to-earn** "
-    "to see all the ways you can earn with us. 🎉"
+    "\U0001f389 Congratulations! You've completed onboarding and now have full access "
+    "to the Beckham Hotel server. Head to "
+    "[**All the Ways to Earn with Beckham Hotel Collection**](https://discord.com/channels/1546233619884941503/1559622381302190181) "
+    "to see all the ways you can earn with us!"
 )
 
 
@@ -394,11 +395,23 @@ class QuestionnaireCompletionTests(unittest.TestCase):
         guild = SimpleNamespace(id=10, get_channel=lambda _: SimpleNamespace(name="opportunities-to-earn"))
         self.assertEqual(
             completion_message(guild, 20),
-            "You now have full access to the Beckham Hotel creator community! Head to "
+            "\U0001f389 Congratulations! You've completed onboarding and now have full access "
+            "to the Beckham Hotel server. Head to "
             "[#opportunities-to-earn](https://discord.com/channels/10/20) "
-            "to see all the ways you can earn with us. 🎉",
+            "to see all the ways you can earn with us!",
         )
-        self.assertIn("**#opportunities-to-earn**", completion_message(guild, None))
+        self.assertEqual(completion_message(guild, None), FULL_ACCESS)
+
+    def test_old_affiliate_chat_setting_links_to_earning_opportunities(self):
+        _, interaction, _ = self.finish(
+            in_ticket=True,
+            granted=True,
+            settings={CHANNEL_SETTINGS["opportunities"]: "1549413913727209522"},
+        )
+        self.assertEqual(interaction.channel.sent[0]["content"], FULL_ACCESS)
+
+    def test_opportunities_link_does_not_need_channel_cache(self):
+        self.assertEqual(completion_message(None, 1559622381302190181), FULL_ACCESS)
 
     def test_ticket_gets_full_access_message_after_the_role(self):
         cgk, interaction, followups = self.finish(in_ticket=True, granted=True)
