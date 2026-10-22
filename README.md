@@ -22,13 +22,14 @@ Three systems power it:
 
 All of it is driven from the Mod Panel — no commands to memorise.
 
-Use **Onboarding Channel** in the Mod Panel to select a text channel and post
-the **START MY ONBOARDING** button with instructions for members. The button
-opens the member's private onboarding channel, or returns them to their existing
-channel, and continues the original onboarding flow. Posted buttons work after
-bot restarts. After the questionnaire is successfully saved, the bot grants the
-configured access role and removes the **Onboarding** role
-(`1559650120621105182`). The bot needs **Manage Roles** and a role above
+Use **🚪 Auto Onboarding** in the Mod Panel to turn onboarding new members ON
+or OFF. While it is ON, every member who joins automatically gets the
+onboarding role (`1562894684609581116`), loses sight of <#1546233621063667835>, and gets their own
+private onboarding channel straight away. After the questionnaire is
+successfully saved, the bot grants the configured access role, removes the
+onboarding role and the old **Onboarding** role (`1559650120621105182`), and shows
+<#1546233621063667835> again. The bot needs **Manage Permissions** in that channel.
+**START MY ONBOARDING** buttons posted earlier keep working. The bot needs **Manage Roles** and a role above
 both roles. Refresh an existing Mod Panel with **Refresh Dashboard** to see
 the new control after restarting the bot.
 
