@@ -20,7 +20,7 @@ can answer there. Every button has a static custom_id, so posts keep working
 after a restart.
 
 The first post in a private channel also carries **🔒 Close onboarding**:
-the member or any moderator can close (delete) the channel from there.
+only members with the designated moderator role can delete the channel from there.
 
 Moderator side: Scan -> pick the join days -> Send. Every selected member
 gets their own private ``#<handle>-onboarding`` channel in the onboarding
@@ -36,7 +36,7 @@ import logging
 
 import discord
 
-from cogs.beckham_onboarding import TICKET_INTRO, can_close
+from cogs.beckham_onboarding import ONBOARDING_MODERATOR_ROLE_ID, TICKET_INTRO, can_close
 from cogs.creator_onboarding import (
     CHANNEL_HINTS,
     CHANNEL_LABELS,
@@ -227,21 +227,15 @@ async def ask_to_close(interaction: discord.Interaction) -> None:
         return
     if not can_close(interaction.user, interaction.channel, owner):
         await interaction.response.send_message(
-            f"Only <@{owner}> or the Beckham team can close this onboarding channel.",
+            f"Only moderators with <@&{ONBOARDING_MODERATOR_ROLE_ID}> can close this onboarding channel.",
             ephemeral=True,
             allowed_mentions=NO_MENTIONS,
         )
         return
-    if interaction.user.id == owner:
-        detail = (
-            "This channel and its messages are deleted. If you haven't finished "
-            "onboarding yet, ask the team in a support ticket to open a new one."
-        )
-    else:
-        detail = (
-            f"This deletes <@{owner}>'s onboarding channel and its messages for "
-            "everyone. Tagging them again opens a fresh channel."
-        )
+    detail = (
+        f"This deletes <@{owner}>'s onboarding channel and its messages for "
+        "everyone. Tagging them again opens a fresh channel."
+    )
     await interaction.response.send_message(
         embed=embed_builder.warning_embed("Close this onboarding channel?", detail),
         view=CloseConfirmView(interaction.channel.id),
@@ -271,7 +265,8 @@ class CloseConfirmView(discord.ui.View):
         if not can_close(interaction.user, channel, await tickets.owner_of(channel)):
             await interaction.response.edit_message(
                 embed=embed_builder.error_embed(
-                    "Not allowed", "Only the member or the Beckham team can close this channel."
+                    "Not allowed",
+                    f"Only moderators with <@&{ONBOARDING_MODERATOR_ROLE_ID}> can close this channel.",
                 ),
                 view=None,
             )
@@ -283,6 +278,13 @@ class CloseConfirmView(discord.ui.View):
         self.stop()
         try:
             await tickets.close_ticket(channel, closed_by=interaction.user)
+        except PermissionError:
+            await interaction.edit_original_response(
+                embed=embed_builder.error_embed(
+                    "Not allowed",
+                    f"Only moderators with <@&{ONBOARDING_MODERATOR_ROLE_ID}> can close this channel.",
+                ),
+            )
         except discord.HTTPException as exc:
             logger.warning("Could not close onboarding channel %s: %s", channel.id, exc)
             await interaction.edit_original_response(
@@ -381,7 +383,7 @@ class CreatorQuestionnaireModal(QuestionnaireModal):
                 logger.warning("Could not complete Beckham onboarding", exc_info=True)
 
         if granted:
-            text = completion_message(interaction.guild, await self._opportunities_id(interaction))
+            text = completion_message(interaction.guild, await self._completion_channel_id(interaction))
         else:
             text = (
                 "✅ Thank you! Your answers are saved and our team has them. We "
@@ -395,8 +397,8 @@ class CreatorQuestionnaireModal(QuestionnaireModal):
             post = text
             if not granted and member is not None:
                 post += (
-                    f"\n\n⚠️ The access role could not be granted to {member.mention} "
-                    "— a moderator needs to add it."
+                    f"\n\n⚠️ Onboarding roles could not be updated for {member.mention} "
+                    "— a moderator needs to check the access role and remove the Onboarding role."
                 )
             try:
                 await interaction.channel.send(post, allowed_mentions=NO_MENTIONS)
@@ -411,14 +413,14 @@ class CreatorQuestionnaireModal(QuestionnaireModal):
         await interaction.followup.send(text, ephemeral=True)
 
     @staticmethod
-    async def _opportunities_id(interaction: discord.Interaction) -> int | None:
+    async def _completion_channel_id(interaction: discord.Interaction) -> int | None:
         cog = _creator_cog(interaction)
         if cog is None or interaction.guild is None:
             return None
         try:
             return (await cog.settings(interaction.guild.id)).channels.get("opportunities")
         except Exception:  # noqa: BLE001 - the message still goes out without the link
-            logger.warning("Could not read the opportunities channel", exc_info=True)
+            logger.warning("Could not read the completion chat channel", exc_info=True)
             return None
 
 

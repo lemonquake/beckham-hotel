@@ -38,8 +38,9 @@ from views.creator_onboarding_view import (
 )
 from views.mod_panel_view import ModPanelView
 
-# Beckham server defaults (config.py): information channel and support tickets.
-INFO_CHANNEL = 1553106965922578595
+# Beckham server defaults: TikTok Shop 101, support tickets, and earning opportunities.
+INFO_CHANNEL = 1559617441389088931
+OPPORTUNITIES_CHANNEL = 1559622381302190181
 SUPPORT_CHANNEL = 1549416221995307058
 
 
@@ -172,6 +173,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.channels["getting_started"], INFO_CHANNEL)
         self.assertEqual(settings.sources["getting_started"], "env")
         self.assertEqual(settings.channels["support"], SUPPORT_CHANNEL)
+        self.assertEqual(settings.channels["opportunities"], OPPORTUNITIES_CHANNEL)
 
     def test_set_and_clear_channel(self):
         cog = make_cog()
@@ -285,11 +287,11 @@ class MemberButtonTests(unittest.TestCase):
         guild = SimpleNamespace(
             id=1546233619884941503,
             get_channel=lambda channel_id: SimpleNamespace(
-                name={INFO_CHANNEL: "information", SUPPORT_CHANNEL: "support-ticket"}[channel_id]
+                name={INFO_CHANNEL: "tiktok-shop-101", SUPPORT_CHANNEL: "support-ticket"}[channel_id]
             ),
         )
         self.assertIn(
-            "Head to [#information](https://discord.com/channels/1546233619884941503/1553106965922578595)",
+            "Head to [#tiktok-shop-101](https://discord.com/channels/1546233619884941503/1559617441389088931)",
             learning_message(guild, INFO_CHANNEL),
         )
         self.assertIn(
@@ -365,9 +367,9 @@ FULL_ACCESS = (
 
 
 class QuestionnaireCompletionTests(unittest.TestCase):
-    def finish(self, *, in_ticket, granted, saved=True, settings=None, channel_fails=False):
+    def finish(self, *, in_ticket, granted, saved=True, settings=None, channel_fails=False, guild=None):
         cgk = FakeTicketCog(owner=42 if in_ticket else None, granted=granted)
-        interaction = make_interaction(make_cog(settings), tickets=cgk)
+        interaction = make_interaction(make_cog(settings), guild=guild, tickets=cgk)
         interaction.user = FakeGuildMember(42)
         followups, deleted = [], []
 
@@ -435,8 +437,11 @@ class QuestionnaireCompletionTests(unittest.TestCase):
         _, interaction, followups = self.finish(in_ticket=True, granted=False)
         post = interaction.channel.sent[0]["content"]
         self.assertIn("our team will give you access shortly", post)
-        self.assertIn("could not be granted to <@42>", post)
+        self.assertIn("roles could not be updated for <@42>", post)
+        self.assertIn("remove the Onboarding role", post)
         self.assertNotIn("full access", post)
+        self.assertNotIn("Congratulations", post)
+        self.assertNotIn(str(OPPORTUNITIES_CHANNEL), post)
 
     def test_falls_back_to_private_reply_if_channel_post_fails(self):
         _, _, followups = self.finish(in_ticket=True, granted=True, channel_fails=True)

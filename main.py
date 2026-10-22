@@ -29,6 +29,7 @@ from views.creator_onboarding_view import (
 )
 from views.member_report_view import MemberReportHubView
 from views.mod_panel_view import ModPanelView
+from views.onboarding_channel_view import OnboardingStartView
 from views.onboarding_view import OnboardingHubView
 
 # Configure logging
@@ -78,6 +79,7 @@ class BeckhamBot(commands.Bot):
         logger.info("Registering persistent views...")
         # Static custom_ids keep every panel button alive across restarts.
         self.add_view(ModPanelView())
+        self.add_view(OnboardingStartView())
         self.add_view(OnboardingHubView())
         self.add_view(CreatorOnboardingHubView())
         self.add_view(BeckhamOnboardingHubView())

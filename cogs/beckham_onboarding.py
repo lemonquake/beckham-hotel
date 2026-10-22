@@ -8,8 +8,8 @@ onboarding category. Only that member and the server's moderators can see
 it. The member is tagged there with the creator questions (✅ YES / ❌ NO,
 then 🌱 / 🔥), the community rules and the Slack-connected questionnaire.
 Submitting the questionnaire grants the access role that unlocks the rest
-of the server. The member or any moderator can close the channel with its
-🔒 Close onboarding button, which deletes it.
+of the server. Only members with the designated moderator role can use the
+🔒 Close onboarding button, which deletes the channel.
 
 Every send is remembered as one "tagged group", so the most recent group can
 be cleared and tagged again from the scan screen.
@@ -62,6 +62,8 @@ ENV_DEFAULTS = {
 CATEGORY_LIMIT = 50
 CREATE_PACE_SECONDS = 1.0
 PROGRESS_EVERY = 5
+ONBOARDING_MODERATOR_ROLE_ID = 1549415196123074581
+ONBOARDING_PENDING_ROLE_ID = 1559650120621105182
 
 # Roles with any of these can moderate, so they can see every onboarding channel.
 STAFF_PERMISSIONS = (
@@ -127,13 +129,10 @@ def is_staff_role(role: discord.Role) -> bool:
 def can_close(
     member: discord.Member, channel: discord.abc.GuildChannel, owner_id: int | None
 ) -> bool:
-    """The channel's own member, or anyone who moderates, may close it."""
-    if owner_id is None:
-        return False
-    if member.id == owner_id:
-        return True
-    permissions = channel.permissions_for(member)
-    return any(getattr(permissions, name, False) for name in STAFF_PERMISSIONS)
+    """Only the designated moderator role can close an onboarding channel."""
+    return owner_id is not None and any(
+        role.id == ONBOARDING_MODERATOR_ROLE_ID for role in getattr(member, "roles", ())
+    )
 
 
 def ticket_overwrites(
@@ -169,6 +168,7 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._self_service_lock = asyncio.Lock()
         self.db = get_database(COMMUNITY_DATABASE_PATH)
         self._selection_lock = asyncio.Lock()
 
@@ -247,6 +247,14 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
             problems.append(
                 f"Move the bot's role **above** {role.mention} in Server Settings → Roles, "
                 "so it can hand that role out."
+            )
+        if role is not None and role.id == ONBOARDING_PENDING_ROLE_ID:
+            problems.append("Choose an access role other than the **Onboarding** role.")
+        pending_role = guild.get_role(ONBOARDING_PENDING_ROLE_ID)
+        if pending_role is not None and (pending_role.managed or pending_role >= me.top_role):
+            problems.append(
+                "The bot must be above the **Onboarding** role, and that role must "
+                "be editable, so it can be removed on completion."
             )
         return problems
 
@@ -389,6 +397,18 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
         )
         return channel, created
 
+    async def start_self_service(
+        self, member: discord.Member, category: discord.CategoryChannel, view: discord.ui.View
+    ) -> tuple[discord.TextChannel, bool]:
+        """Reuse the current flow without posting duplicate welcomes on repeat clicks."""
+        async with self._self_service_lock:
+            channel = await self._ticket_channel(member.guild, member.id)
+            if channel is not None:
+                return channel, False
+            return await self.open_ticket(
+                member, category, view, batch_id=None, tagged_by=None
+            )
+
     async def deliver(
         self,
         *,
@@ -445,7 +465,9 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
     async def close_ticket(
         self, channel: discord.TextChannel, *, closed_by: discord.abc.User
     ) -> None:
-        """Deletes a member's onboarding channel."""
+        """Deletes an onboarding channel when requested by an authorized moderator."""
+        if not can_close(closed_by, channel, await self.owner_of(channel)):
+            raise PermissionError("Only the designated moderators can close onboarding channels.")
         await channel.delete(reason=f"Onboarding channel closed by {closed_by} ({closed_by.id})")
         await self.forget_channel(channel.guild.id, channel.id)
         logger.info("Onboarding channel %s closed by %s", channel.id, closed_by.id)
@@ -464,15 +486,18 @@ class BeckhamOnboardingCog(commands.Cog, name="BeckhamOnboardingCog"):
         guild = member.guild
         settings = await self.settings(guild.id)
         role = self.role(guild, settings)
-        if role is None:
-            logger.warning("Beckham onboarding access role %s not found", settings.role_id)
+        if role is None or role.id == ONBOARDING_PENDING_ROLE_ID:
+            logger.warning("Beckham onboarding access role %s is missing or invalid", settings.role_id)
             return False
-        if role not in member.roles:
-            try:
+        try:
+            if role not in member.roles:
                 await member.add_roles(role, reason="Completed Beckham onboarding")
-            except discord.HTTPException as exc:
-                logger.warning("Could not grant %s to %s: %s", role.id, member.id, exc)
-                return False
+            pending_role = guild.get_role(ONBOARDING_PENDING_ROLE_ID)
+            if pending_role is not None and pending_role in member.roles:
+                await member.remove_roles(pending_role, reason="Completed Beckham onboarding")
+        except discord.HTTPException as exc:
+            logger.warning("Could not update onboarding roles for %s: %s", member.id, exc)
+            return False
         await self.db.execute(
             """
             INSERT INTO beckham_onboarding_members (user_id, guild_id, completed_at)

@@ -103,13 +103,13 @@ ONBOARDING_CHANNEL_ID = _optional_int("ONBOARDING_CHANNEL_ID")
 INTRODUCTIONS_CHANNEL_ID = _optional_int("INTRODUCTIONS_CHANNEL_ID")
 
 # Creator onboarding (the TikTok Shop question): where the interactive welcome
-# is posted by default, the getting-started channel (the information channel)
+# is posted by default, the getting-started channel (TikTok Shop 101)
 # that learning creators are sent to, and the support-ticket channel linked in
 # the community rules. All three can be changed from the Mod Panel
 # (Onboarding -> Settings); saved choices win over these values.
 CREATOR_WELCOME_CHANNEL_ID = _optional_int("CREATOR_WELCOME_CHANNEL_ID")
 CREATOR_GETTING_STARTED_CHANNEL_ID = _optional_int(
-    "CREATOR_GETTING_STARTED_CHANNEL_ID", "1553106965922578595"
+    "CREATOR_GETTING_STARTED_CHANNEL_ID", "1559617441389088931"
 )
 CREATOR_SUPPORT_CHANNEL_ID = _optional_int("CREATOR_SUPPORT_CHANNEL_ID", "1549416221995307058")
 

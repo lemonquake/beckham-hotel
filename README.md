@@ -22,6 +22,16 @@ Three systems power it:
 
 All of it is driven from the Mod Panel — no commands to memorise.
 
+Use **Onboarding Channel** in the Mod Panel to select a text channel and post
+the **START MY ONBOARDING** button with instructions for members. The button
+opens the member's private onboarding channel, or returns them to their existing
+channel, and continues the original onboarding flow. Posted buttons work after
+bot restarts. After the questionnaire is successfully saved, the bot grants the
+configured access role and removes the **Onboarding** role
+(`1559650120621105182`). The bot needs **Manage Roles** and a role above
+both roles. Refresh an existing Mod Panel with **Refresh Dashboard** to see
+the new control after restarting the bot.
+
 ---
 
 ## Step-by-Step Installation & Setup Guide
@@ -185,7 +195,7 @@ Two optional shortcuts post standalone panels for teams that prefer them: `/onbo
 
 **First-time setup:**
 
-1. **👋 Onboarding → ⚙️ Settings** — already points to the **information channel** (`1553106965922578595`, where 🌱 creators are sent) and the **support-ticket channel** (`1549416221995307058`, linked in the community rules). Change them there only if they move. Optionally pick a default test channel or the opportunities channel linked after completion.
+1. **👋 Onboarding → ⚙️ Settings** — already points to the **TikTok Shop 101 channel** (`1559617441389088931`, where 🌱 creators are sent), the **support-ticket channel** (`1549416221995307058`, linked in the community rules), and the **opportunities-to-earn channel** (`1559622381302190181`, linked after successful onboarding). Change them there only if they move. Optionally pick a default test channel. After the access role is granted, the bot congratulates the member and links them to **All the Ways to Earn with Beckham Hotel Collection**.
 2. **🎟️ Beckham Onboarding → ⚙️ Settings** — The **onboarding category** is `1559567789948141710`, and the **Member access role** granted after the questionnaire is `1559568207495303279`. Both are saved for the Beckham server and can be changed here.
 3. In *Server Settings → Roles*, put the bot's role **above** the access role, and give the bot **Manage Channels** and **Manage Roles**. The hub lists anything still missing.
 
@@ -210,7 +220,7 @@ to unlock all of the server's channels.
 Questionnaire submitted → answers saved and sent to Slack, access role granted
 ```
 
-Only the channel's member can answer in it. A category holds at most **50** channels, so delete finished onboarding channels from time to time. The **👋 Onboarding** button also opens one private channel per member. Its **Test message** control can post the questions to a shared channel with private replies. **Close onboarding** asks for confirmation and deletes the channel; only its member or a moderator can close it. Buttons remain registered after a restart.
+Only the channel's member can answer in it. A category holds at most **50** channels, so delete finished onboarding channels from time to time. The **👋 Onboarding** button also opens one private channel per member. Its **Test message** control can post the questions to a shared channel with private replies. **Close onboarding** asks for confirmation and deletes the channel; only moderators with role ID `1549415196123074581` can use it. Members cannot close their own channels. Buttons remain registered after a restart.
 
 ---
 
@@ -473,7 +483,7 @@ Created by **Aljay Leodones** for **Beckham Hotel**.
 
 ## Member questionnaire and Slack responses
 
-Use `/onboarding` or the mod panel Onboarding button to publish the member form in Introduce Yourself. The five questions collect TikTok handle, email, phone number, last 30 days TikTok GMV, and an optional birthday. The member's Discord account is captured automatically. Responses are saved locally and sent to the brand's private Slack channel.
+Use `/onboarding` or the mod panel Onboarding button to publish the member form in Introduce Yourself. The three required questions collect TikTok handle, email, and phone number. The member's Discord account is captured automatically. Responses are saved locally and sent to the brand's private Slack channel.
 
 See [SLACK_ONBOARDING_SETUP.md](SLACK_ONBOARDING_SETUP.md) for admin installation steps, private webhook configuration, connection testing, and delivery troubleshooting.
 

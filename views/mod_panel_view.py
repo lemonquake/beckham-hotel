@@ -15,6 +15,7 @@ from utils import embed_builder
 from views.announcement_view import open_announcements
 from views.beckham_onboarding_view import BeckhamOnboardingHubView, build_beckham_hub_embed
 from views.common import require_manage
+from views.onboarding_channel_view import open_onboarding_channel_picker
 from views.creator_onboarding_view import (
     CreatorOnboardingHubView,
     build_creator_hub_embed,
@@ -39,6 +40,7 @@ logger = logging.getLogger("beckham_bot.mod_panel_ui")
 FIELD_LIMIT = 1024
 
 FUNCTION_GUIDE = [
+    ("Onboarding Channel", "Choose a channel and post START MY ONBOARDING so members can begin their private onboarding."),
     ("🎟️ Beckham Onboarding", "Scan new members and open a private #handle-onboarding channel for each — finishing it unlocks the server. 🧪 Test it on yourself or a member with /test-onboarding; 🔒 Close onboarding deletes a channel."),
     ("👋 Onboarding", "Open private onboarding channels and tag new members with the TikTok Shop creator question (✅ YES / ❌ NO). 🧪 Test it in any channel."),
     ("ℹ️ Information Onboarding", "Welcome new members with a tagged post and warm DM, plus the member questionnaire."),
@@ -278,6 +280,17 @@ class ModPanelView(discord.ui.View):
         super().__init__(timeout=None)
 
     # ── Row 0: onboarding ─────────────────────────────────────
+    @discord.ui.button(
+        label="Onboarding Channel",
+        style=discord.ButtonStyle.success,
+        custom_id="beckham_mod_panel:onboarding_channel",
+        row=0,
+    )
+    async def onboarding_channel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await open_onboarding_channel_picker(interaction)
+
     @discord.ui.button(
         label="Beckham Onboarding",
         style=discord.ButtonStyle.success,

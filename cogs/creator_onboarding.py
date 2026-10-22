@@ -107,7 +107,7 @@ CHANNEL_SETTINGS = {
 }
 CHANNEL_LABELS = {
     "welcome": "Default test channel",
-    "getting_started": "Getting-started channel",
+    "getting_started": "TikTok Shop 101 channel",
     "support": "Support-ticket channel",
     "opportunities": "Opportunities channel",
 }
